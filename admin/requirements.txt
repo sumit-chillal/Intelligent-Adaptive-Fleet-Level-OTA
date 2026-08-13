@@ -1,0 +1,5 @@
+# Admin machine (Mac) — Phase 1 connection layer only.
+# The FastAPI/SQLAlchemy stack lands in backend/requirements.txt in Phase 2.
+paho-mqtt==2.1.0
+python-dotenv==1.0.1
+cryptography==42.0.8

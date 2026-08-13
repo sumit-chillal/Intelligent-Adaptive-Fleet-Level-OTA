@@ -1,0 +1,93 @@
+# ============================================================================
+# LAPTOP D — the failure demonstration fleet.
+#   docker compose -f docker-compose.laptopD.yml up --build -d
+#
+# tcu_D_001..003 are healthy.
+# tcu_D_004 sits at 8% battery  -> FAILED_LOW_BATTERY
+# tcu_D_005 sits at network 1   -> FAILED_POOR_NETWORK
+#
+# These two are what push the batch failure rate to 40% and force the adaptive
+# engine to shrink the batch on stage. They fail MID-TRANSFER rather than being
+# skipped at offer time, because only a FAILED outcome counts toward the
+# failure rate (Rules.md §3). That is why FAILURE_MODE is set explicitly here
+# instead of relying on the eligibility gate alone.
+# ============================================================================
+name: convoy-fleet-d
+
+x-tcu: &tcu
+  build: .
+  image: convoy/tcu-sim:0.1
+  restart: unless-stopped
+  env_file: .env
+  environment: &tcu-env
+    DEVICE_TYPE: tcu-sim
+    DEVICE_MODEL: tcu-sim-v1
+    HW_REV: A1
+    FLEET_TAG: laptopD
+    FAILURE_MODE: none
+    BATTERY_JITTER: 1
+    NETWORK_JITTER: 0
+
+services:
+  tcu_D_001:
+    <<: *tcu
+    container_name: tcu_D_001
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_D_001
+      BATTERY_LEVEL: 89
+      NETWORK_QUALITY: 5
+    volumes: [tcu_D_001_data:/data]
+
+  tcu_D_002:
+    <<: *tcu
+    container_name: tcu_D_002
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_D_002
+      BATTERY_LEVEL: 85
+      NETWORK_QUALITY: 4
+    volumes: [tcu_D_002_data:/data]
+
+  tcu_D_003:
+    <<: *tcu
+    container_name: tcu_D_003
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_D_003
+      BATTERY_LEVEL: 82
+      NETWORK_QUALITY: 5
+    volumes: [tcu_D_003_data:/data]
+
+  # ---- guaranteed failure #1 : battery ------------------------------------
+  tcu_D_004:
+    <<: *tcu
+    container_name: tcu_D_004
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_D_004
+      BATTERY_LEVEL: 8
+      NETWORK_QUALITY: 5
+      FAILURE_MODE: low_battery
+      FAILURE_PROBABILITY: 1.0
+    volumes: [tcu_D_004_data:/data]
+
+  # ---- guaranteed failure #2 : network ------------------------------------
+  tcu_D_005:
+    <<: *tcu
+    container_name: tcu_D_005
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_D_005
+      BATTERY_LEVEL: 84
+      NETWORK_QUALITY: 1
+      FAILURE_MODE: poor_network
+      FAILURE_PROBABILITY: 1.0
+    volumes: [tcu_D_005_data:/data]
+
+volumes:
+  tcu_D_001_data:
+  tcu_D_002_data:
+  tcu_D_003_data:
+  tcu_D_004_data:
+  tcu_D_005_data:

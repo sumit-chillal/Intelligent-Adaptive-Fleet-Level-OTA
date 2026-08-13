@@ -1,0 +1,46 @@
+# ============================================================================
+# CONVOY — ADMIN stack (Laptop A / Mac ONLY)
+# Runs the datastores. FastAPI and Next.js run natively on the host so that
+# hot reload and the projector-facing terminal behave predictably.
+#
+#   docker compose -f docker-compose.admin.yml --env-file .env up -d
+#
+# This machine runs ZERO TCU devices. That is deliberate: it proves every
+# device in the demo is genuinely remote.
+# ============================================================================
+name: convoy-admin
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: convoy_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - convoy_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: convoy_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  convoy_pgdata:

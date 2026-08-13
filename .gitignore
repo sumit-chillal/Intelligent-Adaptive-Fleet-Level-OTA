@@ -1,0 +1,40 @@
+# ============================================================================
+# CONVOY — secrets and local state.
+# Verify this file exists and is committed BEFORE your first push.
+# A leaked firmware signing key means re-provisioning every device.
+# ============================================================================
+
+# environment files — templates are tracked, real ones never are
+.env
+.env.*
+!.env.example
+!.env.dashboard.example
+
+# signing keys
+admin/secrets/*
+!admin/secrets/.gitkeep
+*.pem
+*.raw
+
+# per-board ESP32 config (WiFi + MQTT credentials)
+hardware/esp32-tcu/include/config.h
+
+# runtime
+storage/
+data/
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node / next
+node_modules/
+.next/
+out/
+
+# os
+.DS_Store
+Thumbs.db

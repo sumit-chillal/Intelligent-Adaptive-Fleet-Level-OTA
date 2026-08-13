@@ -1,0 +1,81 @@
+# ============================================================================
+# LAPTOP B — five healthy TCUs.
+#   docker compose -f docker-compose.laptopB.yml up --build -d
+#   docker compose -f docker-compose.laptopB.yml logs -f
+#
+# Identity and health are declared here, per container. Nothing is hardcoded
+# in the Python source, and credentials come from .env, never from this file.
+# ============================================================================
+name: convoy-fleet-b
+
+x-tcu: &tcu
+  build: .
+  image: convoy/tcu-sim:0.1
+  restart: unless-stopped
+  env_file: .env
+  environment: &tcu-env
+    DEVICE_TYPE: tcu-sim
+    DEVICE_MODEL: tcu-sim-v1
+    HW_REV: A1
+    FLEET_TAG: laptopB
+    FAILURE_MODE: none
+    BATTERY_JITTER: 1
+    NETWORK_JITTER: 0
+
+services:
+  tcu_B_001:
+    <<: *tcu
+    container_name: tcu_B_001
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_B_001
+      BATTERY_LEVEL: 90
+      NETWORK_QUALITY: 5
+    volumes: [tcu_B_001_data:/data]
+
+  tcu_B_002:
+    <<: *tcu
+    container_name: tcu_B_002
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_B_002
+      BATTERY_LEVEL: 86
+      NETWORK_QUALITY: 5
+    volumes: [tcu_B_002_data:/data]
+
+  tcu_B_003:
+    <<: *tcu
+    container_name: tcu_B_003
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_B_003
+      BATTERY_LEVEL: 83
+      NETWORK_QUALITY: 4
+    volumes: [tcu_B_003_data:/data]
+
+  tcu_B_004:
+    <<: *tcu
+    container_name: tcu_B_004
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_B_004
+      BATTERY_LEVEL: 80
+      NETWORK_QUALITY: 4
+    volumes: [tcu_B_004_data:/data]
+
+  tcu_B_005:
+    <<: *tcu
+    container_name: tcu_B_005
+    environment:
+      <<: *tcu-env
+      DEVICE_ID: tcu_B_005
+      BATTERY_LEVEL: 78
+      NETWORK_QUALITY: 5
+    volumes: [tcu_B_005_data:/data]
+
+volumes:
+  tcu_B_001_data:
+  tcu_B_002_data:
+  tcu_B_003_data:
+  tcu_B_004_data:
+  tcu_B_005_data:
