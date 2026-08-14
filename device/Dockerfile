@@ -3,7 +3,7 @@
 # Identity and health come from environment variables at run time, never from
 # a baked-in file, so a laptop runs five distinct devices from this one build.
 # ============================================================================
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

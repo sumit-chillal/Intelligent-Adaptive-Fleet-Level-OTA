@@ -1,0 +1,25 @@
+# ============================================================================
+# CONVOY backend — Phase 2A (pure logic core; no DB or broker yet)
+#
+# INTERPRETER: Python 3.12.x  (3.11 also fine)
+#
+# Do NOT use Python 3.13+ or 3.14 for this project. Several dependencies in the
+# stack ship compiled extensions (pydantic-core is Rust/PyO3, asyncpg and
+# cryptography are C) and the maintainers publish prebuilt wheels only for
+# interpreter versions they officially support. On a newer interpreter, pip
+# falls back to compiling from source, which needs a full Rust toolchain and
+# then fails anyway because PyO3 refuses to build against an interpreter newer
+# than it supports.
+#
+# This is not a bug you should work around with build flags. It is the normal
+# cost of living on the newest interpreter, and the fix is to use a supported
+# one. Check before creating the venv:   python3 --version
+# ============================================================================
+
+cryptography==42.0.8
+pydantic==2.8.2
+pydantic-settings==2.4.0
+
+# dev
+pytest==8.3.2
+pytest-cov==5.0.0

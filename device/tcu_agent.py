@@ -109,6 +109,15 @@ T_STATUS = f"{TOPIC_ROOT}/d/{DEVICE_ID}/status"
 T_PONG = f"{TOPIC_ROOT}/d/{DEVICE_ID}/pong"
 T_CMD = f"{TOPIC_ROOT}/s/{DEVICE_ID}/cmd"
 
+# Broadcast command channel. Every device subscribes to this in addition to its
+# own. The server uses it to ask the whole fleet to re-announce itself after a
+# server restart -- without it, a backend that starts up after the devices has
+# no idea what firmware version anything is running, because `hello` is a
+# one-shot message that was published before the server was listening.
+# This is the same "desired vs reported state re-sync" pattern used by AWS IoT
+# device shadows and Azure IoT twins.
+T_CMD_ALL = f"{TOPIC_ROOT}/s/all/cmd"
+
 # ------------------------------------------------------------- local state --
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / f"{DEVICE_ID}.json"
@@ -168,15 +177,8 @@ def envelope(**fields) -> str:
 
 
 # ------------------------------------------------------------- mqtt handlers -
-def on_connect(client, _userdata, _flags, rc, properties=None):
-    if rc != 0:
-        log.error("broker refused connection rc=%s — check MQTT_USERNAME/PASSWORD", rc)
-        return
-    log.info("connected to %s:%s", MQTT_HOST, MQTT_PORT)
-    client.subscribe(T_CMD, qos=1)
-
-    client.publish(T_STATUS, envelope(schema="convoy.status.v1", online=True),
-                   qos=1, retain=True)
+def publish_hello(client: mqtt.Client, trigger: str) -> None:
+    """Announce identity, capabilities, and current firmware version."""
     client.publish(T_HELLO, envelope(
         schema="convoy.hello.v1",
         device_type=DEVICE_TYPE,
@@ -190,9 +192,24 @@ def on_connect(client, _userdata, _flags, rc, properties=None):
         failure_profile={"mode": FAILURE_MODE, "p": FAILURE_PROBABILITY},
         resume_pending=state.get("resume") is not None,
         agent="tcu-agent/0.1",
+        trigger=trigger,
     ), qos=1)
-    log.info("announced v%s battery=%d%% net=%d profile=%s",
-             state["current_version"], round(battery), NETWORK_QUALITY, FAILURE_MODE)
+    log.info("announced v%s battery=%d%% net=%d profile=%s (trigger=%s)",
+             state["current_version"], round(battery), NETWORK_QUALITY,
+             FAILURE_MODE, trigger)
+
+
+def on_connect(client, _userdata, _flags, rc, properties=None):
+    if rc != 0:
+        log.error("broker refused connection rc=%s — check MQTT_USERNAME/PASSWORD", rc)
+        return
+    log.info("connected to %s:%s", MQTT_HOST, MQTT_PORT)
+    client.subscribe(T_CMD, qos=1)
+    client.subscribe(T_CMD_ALL, qos=1)
+
+    client.publish(T_STATUS, envelope(schema="convoy.status.v1", online=True),
+                   qos=1, retain=True)
+    publish_hello(client, trigger="connect")
 
 
 def on_disconnect(_client, _userdata, rc, properties=None, reason=None):
@@ -210,6 +227,12 @@ def on_message(client, _userdata, msg: mqtt.MQTTMessage):
     if cmd == "ping":
         client.publish(T_PONG, envelope(schema="convoy.pong.v1",
                                         sent_at=payload.get("sent_at")), qos=1)
+    elif cmd == "announce":
+        # The server has (re)started and is rebuilding its picture of the fleet.
+        # Jitter the reply so 10,000 devices don't answer in the same millisecond
+        # and stampede the broker -- the classic thundering-herd failure mode.
+        time.sleep(random.uniform(0, float(payload.get("jitter_s", 2))))
+        publish_hello(client, trigger="announce")
     elif cmd == "set-config":
         # Runtime health override, used to stage a failure live on stage.
         global battery, NETWORK_QUALITY
@@ -238,6 +261,8 @@ def heartbeat(client: mqtt.Client) -> None:
             network_quality=reported_net,
             uptime_s=int(time.time() - started_at),
             current_version=state["current_version"],
+            device_type=DEVICE_TYPE,
+            model=DEVICE_MODEL,
         ), qos=1)
 
 
