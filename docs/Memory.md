@@ -135,3 +135,9 @@ Table                      esp32_001, esp32_002 healthy; esp32_003 battery 8
 **2026-08-15 — Session 3.** Phase 2A. Adaptive engine, crypto, firmware packaging; 38 tests passing including the exact demo scenario and five attack tests. Discovered D15: the scripted 2-of-5 failure sits exactly at the abort threshold and would halt rather than shrink. Python 3.14 → 3.12 detour (D11).
 
 **2026-08-16 — Session 4.** Phase 2B. Postgres schema with the append-only event log, nine tables, migrations applied. Async session layer with startup preflight. MQTT bridge: topic router, Pydantic message schemas, idempotent ingestion, offline reaper. Confirmed D12 (no APAC region) and Q6 (per-topic ACLs available on the free tier — corrects an earlier wrong claim). Fixed the partial-index / ON CONFLICT fault (D16) and the misleading error classification. Laptop D moved out of OneDrive to `~/Projects/convoy`; all five containers connected and announced their configured failure profiles correctly.
+
+**2026-08-17 — Session 5.** Orchestrator, eligibility gate and device-side OTA
+path written and committed. NOT yet run end-to-end — no campaign has been
+started against real devices. Next session: start with ONE device on Laptop D
+(campaign:create --device tcu_D_001), confirm offer → chunks → SUCCESS, then
+widen to the full fleet and watch for the adaptive banner.
