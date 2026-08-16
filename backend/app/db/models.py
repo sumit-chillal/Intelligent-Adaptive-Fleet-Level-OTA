@@ -355,10 +355,19 @@ class DeviceEvent(Base):
         # The dashboard's "recent activity" feed.
         Index("ix_events_ts", "ts"),
         # Idempotency: the same MQTT message may be delivered twice at QoS 1.
-        # A partial unique index enforces exactly-once effect without
-        # penalising the many rows that have no msg_id.
-        Index("uq_events_msg_id", "msg_id", unique=True,
-              postgresql_where=msg_id.isnot(None)),
+        #
+        # This was originally a PARTIAL unique index (WHERE msg_id IS NOT NULL)
+        # to avoid indexing the many rows the server writes without a msg_id.
+        # That does not work with ON CONFLICT: Postgres will only use a partial
+        # index for conflict resolution if the statement repeats the exact same
+        # predicate via index_where, and any mismatch raises
+        #   "there is no unique or exclusion constraint matching the
+        #    ON CONFLICT specification"
+        # A plain unique index is used instead. Postgres treats NULLs as
+        # distinct in a unique index, so server-generated rows with no msg_id
+        # never collide with each other, and the ON CONFLICT clause stays
+        # simple. The cost is indexing those NULL rows, which is negligible.
+        Index("uq_events_msg_id", "msg_id", unique=True),
     )
 
 

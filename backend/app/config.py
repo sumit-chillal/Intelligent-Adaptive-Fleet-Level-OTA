@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     mqtt_topic_root: str = "convoy/v1"
     mqtt_shared_group: str = "convoy-bridge"
     mqtt_client_id: str = "convoy-bridge-1"
+    # MQTT 5 shared subscriptions let several backend replicas split the
+    # device traffic between them. Not every broker tier supports them, so
+    # this defaults OFF: the plain wildcard works everywhere. Turn it on only
+    # after confirming your broker accepts a $share/... subscription.
+    mqtt_use_shared_subscription: bool = False
 
     # ---- datastores --------------------------------------------------------
     database_url: str
@@ -99,6 +104,24 @@ class Settings(BaseSettings):
                 "DATABASE_URL must use the async driver: "
                 "postgresql+asyncpg://... (not postgresql://...)")
         return v
+
+    @field_validator("firmware_signing_private_key_path",
+                     "firmware_storage_dir", mode="after")
+    @classmethod
+    def _resolve_relative_paths(cls, v: Path | None) -> Path | None:
+        """Anchor relative paths to admin/, not the current directory.
+
+        A path like `./secrets/convoy_ed25519_private.pem` in admin/.env is
+        written relative to that file. But the backend runs from backend/, and
+        the CLI can be invoked from anywhere, so resolving against the process
+        working directory finds nothing and produces a confusing "key not
+        found" at exactly the moment you need it. Anchoring to the .env file's
+        own directory makes the path mean what its author intended regardless
+        of where the process was started.
+        """
+        if v is None or v.is_absolute():
+            return v
+        return (REPO_ROOT / "admin" / v).resolve()
 
     @property
     def cors_origin_list(self) -> list[str]:

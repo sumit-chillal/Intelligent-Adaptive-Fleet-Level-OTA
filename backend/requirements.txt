@@ -26,3 +26,7 @@ greenlet==3.0.3
 pytest==8.3.2
 pytest-asyncio==0.24.0
 pytest-cov==5.0.0
+
+# ---- Phase 2B-2: broker ingestion ------------------------------------------
+aiomqtt==2.3.0
+structlog==24.4.0

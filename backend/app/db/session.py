@@ -56,5 +56,23 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+async def check_connection() -> tuple[bool, str]:
+    """Preflight probe. Returns (ok, message).
+
+    Called once at startup so an unreachable database produces ONE clear line
+    of guidance instead of a stack trace per inbound message. A backend that
+    cannot reach its database has nothing useful to do, and discovering that
+    from the first line of output rather than the hundredth matters when you
+    are standing in front of a projector.
+    """
+    from sqlalchemy import text
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True, "ok"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 async def dispose_engine() -> None:
     await engine.dispose()
