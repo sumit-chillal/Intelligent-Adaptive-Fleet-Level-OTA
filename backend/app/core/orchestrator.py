@@ -358,6 +358,19 @@ class Orchestrator:
         emoji = "ok" if reason == str(ReasonCode.SUCCESS) else "FAILED"
         log.info("update_result", device_id=device_id, outcome=emoji, reason=reason)
 
+    def _cancel_stream(self, campaign_id: str, device_id: str) -> None:
+        """Stop pushing chunks at a device that has already finished.
+
+        Without this the stream task runs to completion even after the device
+        has reported failure -- the server keeps publishing all 32 chunks at a
+        client that gave up at chunk 17. Harmless for a 256 KiB image, but at
+        fleet scale it is bandwidth spent on updates that are already lost, and
+        the broker charges for it.
+        """
+        task = self._stream_tasks.pop(f"{campaign_id}:{device_id}", None)
+        if task and not task.done():
+            task.cancel()
+
     async def _finish_target(self, session: AsyncSession, ingestor: Ingestor,
                              target: CampaignTarget, reason: str,
                              battery: int | None, network: int | None,
@@ -370,6 +383,7 @@ class Orchestrator:
         target.state = str(TargetState.SUCCEEDED if success else TargetState.FAILED)
         target.last_reason_code = str(code)
         target.ended_at = _now()
+        self._cancel_stream(target.campaign_id, target.device_id)
 
         batch = await session.scalar(select(Batch).where(Batch.id == target.batch_id))
         if batch is not None:
@@ -519,6 +533,51 @@ class Orchestrator:
             log.error("campaign_aborted", campaign_id=campaign.campaign_id,
                       reason=str(decision.reason))
             return
+
+        # Requirement 11: automatic retry. A device that failed goes back into
+        # the pool for another attempt, at the NEW (usually smaller) batch size.
+        #
+        # Re-queuing happens only AFTER the batch has closed and the decision
+        # has been recorded. Doing it earlier would remove the failure from the
+        # batch before the adaptive engine counted it, and the engine would
+        # never see the failure rate that justified shrinking.
+        #
+        # The attempt counter is the guard against a permanently broken device
+        # cycling forever: tcu_D_004 at 8% battery will fail every attempt, and
+        # after max_attempts it stops for good with FAILED_MAX_ATTEMPTS.
+        retryable = list(await session.scalars(
+            select(CampaignTarget).where(
+                CampaignTarget.campaign_id == campaign.campaign_id,
+                CampaignTarget.batch_id == batch.id,
+                CampaignTarget.state == str(TargetState.FAILED))))
+        for target in retryable:
+            if target.attempts >= campaign.max_attempts:
+                target.last_reason_code = str(ReasonCode.FAILED_MAX_ATTEMPTS)
+                await ingestor.record_event(
+                    device_id=target.device_id, campaign_id=campaign.campaign_id,
+                    batch_id=batch.id, event_type=EventType.UPDATE_FAILED,
+                    reason_code=str(ReasonCode.FAILED_MAX_ATTEMPTS), source="server",
+                    payload={"attempts": target.attempts,
+                             "max_attempts": campaign.max_attempts})
+                log.warning("target_exhausted", device_id=target.device_id,
+                            attempts=target.attempts)
+                continue
+
+            target.state = str(TargetState.PENDING)
+            target.batch_id = None
+            target.ended_at = None
+            # last_chunk_index is deliberately NOT reset: the device kept its
+            # verified chunks, so the retry resumes rather than restarting.
+            await ingestor.record_event(
+                device_id=target.device_id, campaign_id=campaign.campaign_id,
+                batch_id=batch.id, event_type=EventType.RETRY_SCHEDULED,
+                reason_code=target.last_reason_code, source="server",
+                payload={"attempt": target.attempts,
+                         "next_attempt": target.attempts + 1,
+                         "resume_from_chunk": target.last_chunk_index + 1})
+            log.info("retry_scheduled", device_id=target.device_id,
+                     attempt=target.attempts + 1, of=campaign.max_attempts,
+                     reason=target.last_reason_code)
 
         remaining = await session.scalar(
             select(CampaignTarget)
