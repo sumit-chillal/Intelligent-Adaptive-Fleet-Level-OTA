@@ -579,6 +579,17 @@ class Orchestrator:
                      attempt=target.attempts + 1, of=campaign.max_attempts,
                      reason=target.last_reason_code)
 
+        # Push the re-queued rows to the database before asking whether any
+        # PENDING targets remain.
+        #
+        # The session runs with autoflush=False (chosen so a stray SELECT can
+        # never trigger a surprise write mid-handler). The cost is that ORM
+        # changes live only in the identity map until flushed, while the query
+        # below goes to Postgres -- so without this flush the retries are
+        # invisible, `remaining` comes back None, and the campaign completes
+        # having scheduled retries it then never runs.
+        await session.flush()
+
         remaining = await session.scalar(
             select(CampaignTarget)
             .where(CampaignTarget.campaign_id == campaign.campaign_id,

@@ -66,14 +66,25 @@ class Selector:
 
 async def select_devices(session: AsyncSession, selector: Selector,
                          default_model: str) -> list[Device]:
-    stmt = select(Device)
     if selector.device_ids:
-        stmt = stmt.where(Device.device_id.in_(selector.device_ids))
-    else:
-        models = selector.models or [default_model]
-        stmt = stmt.where(Device.model.in_(models))
-        if selector.fleet_tags:
-            stmt = stmt.where(Device.fleet_tag.in_(selector.fleet_tags))
+        rows = list(await session.scalars(
+            select(Device).where(Device.device_id.in_(selector.device_ids))))
+        # Preserve the ORDER the operator gave, not the database's.
+        #
+        # Batch membership follows target order, so ordering is a real rollout
+        # control: it decides which devices are in the canary and where any
+        # known-risky device lands. Alphabetical order would put tcu_D_004 and
+        # tcu_D_005 in the final batch every time, so the campaign would shrink
+        # on its last batch with nothing left to demonstrate the smaller size.
+        # An operator staging a rollout should be able to say "these two first,
+        # these last", and the obvious way to express that is the order they
+        # typed.
+        position = {device_id: i for i, device_id in enumerate(selector.device_ids)}
+        return sorted(rows, key=lambda d: position.get(d.device_id, len(position)))
+
+    stmt = select(Device).where(Device.model.in_(selector.models or [default_model]))
+    if selector.fleet_tags:
+        stmt = stmt.where(Device.fleet_tag.in_(selector.fleet_tags))
     return list(await session.scalars(stmt.order_by(Device.device_id)))
 
 
@@ -149,6 +160,7 @@ async def create_campaign(
     min_network_quality: int | None = None,
     shrink_threshold: float | None = None,
     abort_threshold: float | None = None,
+    max_attempts: int | None = None,
     created_by: str = "cli",
 ) -> tuple[Campaign, int]:
     """Create a campaign and materialise its targets. Returns (campaign, count)."""
@@ -192,7 +204,18 @@ async def create_campaign(
         min_battery=min_battery if min_battery is not None else settings.default_min_battery,
         min_network_quality=min_network_quality if min_network_quality is not None
         else settings.default_min_network_quality,
-        max_attempts=settings.max_attempts_per_device,
+        # 1 means "no retries": a failed device stays failed.
+        #
+        # Retries are the right default for a real fleet -- most failures are
+        # transient. But a device that is PERMANENTLY unfit (8% battery that
+        # never charges) fails every attempt, and because retried targets are
+        # scheduled after the untried ones, the final batch can end up
+        # containing nothing but repeat offenders. That batch is 100% failures
+        # and trips the abort guard, halting a campaign whose healthy devices
+        # were all updating fine. Set max_attempts=1 when you want failures to
+        # be final and the rollout to carry on.
+        max_attempts=max_attempts if max_attempts is not None
+        else settings.max_attempts_per_device,
         batch_timeout_seconds=settings.batch_timeout_seconds,
         current_batch_size=batch_size or settings.default_batch_size,
         created_by=created_by,
