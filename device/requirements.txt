@@ -1,1 +1,5 @@
 paho-mqtt==2.1.0
+
+# Ed25519 signature verification of firmware manifests. The device holds only
+# the PUBLIC key; see app/core/crypto.py on the server for the threat model.
+cryptography==42.0.8

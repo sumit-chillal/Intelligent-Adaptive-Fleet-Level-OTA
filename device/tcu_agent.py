@@ -39,6 +39,10 @@ import uuid
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+import ota
+from ota import Download, FailureInjector, ManifestRejected, ReasonCode
 
 # ----------------------------------------------------------------- config ---
 # Required. Fail loudly rather than start a device with a guessed identity.
@@ -92,6 +96,10 @@ NETWORK_JITTER = int(os.getenv("NETWORK_JITTER", "0"))
 FAILURE_MODE = os.getenv("FAILURE_MODE", "none")
 FAILURE_PROBABILITY = float(os.getenv("FAILURE_PROBABILITY", "0"))
 
+# The server's Ed25519 PUBLIC key, 64 hex chars. Safe to distribute -- it can
+# only verify signatures, never create them. Printed by tools/keygen.py.
+SERVER_PUBLIC_KEY_HEX = os.getenv("SERVER_PUBLIC_KEY_HEX", "")
+
 HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "5"))
 STATE_DIR = Path(os.getenv("STATE_DIR", "/data"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -117,6 +125,13 @@ T_CMD = f"{TOPIC_ROOT}/s/{DEVICE_ID}/cmd"
 # This is the same "desired vs reported state re-sync" pattern used by AWS IoT
 # device shadows and Azure IoT twins.
 T_CMD_ALL = f"{TOPIC_ROOT}/s/all/cmd"
+
+T_OTA_OFFER = f"{TOPIC_ROOT}/s/{DEVICE_ID}/ota/offer"
+T_OTA_CHUNK = f"{TOPIC_ROOT}/s/{DEVICE_ID}/ota/chunk"
+T_OTA_ACK = f"{TOPIC_ROOT}/d/{DEVICE_ID}/ota/ack"
+T_OTA_PROGRESS = f"{TOPIC_ROOT}/d/{DEVICE_ID}/ota/progress"
+T_OTA_RESUME = f"{TOPIC_ROOT}/d/{DEVICE_ID}/ota/resume"
+T_OTA_RESULT = f"{TOPIC_ROOT}/d/{DEVICE_ID}/ota/result"
 
 # ------------------------------------------------------------- local state --
 STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -194,7 +209,7 @@ def publish_hello(client: mqtt.Client, trigger: str) -> None:
         agent="tcu-agent/0.1",
         trigger=trigger,
     ), qos=1)
-    log.info("announced v%s battery=%d%% net=%d profile=%s (trigger=%s)",
+    log.info("announced v%s battery=%d% net=%d profile=%s (trigger=%s)",
              state["current_version"], round(battery), NETWORK_QUALITY,
              FAILURE_MODE, trigger)
 
@@ -206,6 +221,23 @@ def on_connect(client, _userdata, _flags, rc, properties=None):
     log.info("connected to %s:%s", MQTT_HOST, MQTT_PORT)
     client.subscribe(T_CMD, qos=1)
     client.subscribe(T_CMD_ALL, qos=1)
+    client.subscribe(T_OTA_OFFER, qos=1)
+    client.subscribe(T_OTA_CHUNK, qos=1)
+
+    # If a download was interrupted -- container killed, power lost, network
+    # dropped -- ask the server to continue from the last verified chunk rather
+    # than starting over. This is Requirement 11, and the resume state survived
+    # in the state file on the mounted volume.
+    resume = state.get("resume")
+    if resume:
+        log.info("resuming interrupted download from chunk %d",
+                 resume["next_chunk"])
+        client.publish(T_OTA_RESUME, envelope(
+            schema="convoy.resume.v1",
+            campaign_id=resume["campaign_id"],
+            firmware_id=resume.get("firmware_id"),
+            last_chunk_index=resume["next_chunk"] - 1,
+        ), qos=1)
 
     client.publish(T_STATUS, envelope(schema="convoy.status.v1", online=True),
                    qos=1, retain=True)
@@ -221,6 +253,14 @@ def on_message(client, _userdata, msg: mqtt.MQTTMessage):
         payload = json.loads(msg.payload.decode())
     except (UnicodeDecodeError, json.JSONDecodeError):
         log.warning("undecodable message on %s", msg.topic)
+        return
+
+    topic = msg.topic if isinstance(msg.topic, str) else str(msg.topic)
+    if topic == T_OTA_OFFER:
+        handle_offer(client, payload)
+        return
+    if topic == T_OTA_CHUNK:
+        handle_chunk(client, payload)
         return
 
     cmd = payload.get("cmd")
@@ -243,6 +283,181 @@ def on_message(client, _userdata, msg: mqtt.MQTTMessage):
         log.info("config updated battery=%d net=%d", round(battery), NETWORK_QUALITY)
     else:
         log.debug("unhandled cmd=%s (OTA commands land in the next phase)", cmd)
+
+
+# --------------------------------------------------------------------- OTA --
+active: Download | None = None
+injector: FailureInjector | None = None
+
+
+def server_public_key() -> Ed25519PublicKey:
+    if not SERVER_PUBLIC_KEY_HEX:
+        sys.exit("FATAL: SERVER_PUBLIC_KEY_HEX is not set. A device with no\n"
+                 "       verification key cannot safely install firmware.\n"
+                 "       Get it from: python tools/keygen.py (prints the hex)")
+    try:
+        return Ed25519PublicKey.from_public_bytes(bytes.fromhex(SERVER_PUBLIC_KEY_HEX))
+    except ValueError as exc:
+        sys.exit(f"FATAL: SERVER_PUBLIC_KEY_HEX is not a valid key: {exc}")
+
+
+def fail_update(client: mqtt.Client, campaign_id: str, reason: str,
+                detail: str = "", chunk_index: int | None = None) -> None:
+    global active
+    log.error("UPDATE FAILED %s %s", reason, detail)
+    client.publish(T_OTA_RESULT, envelope(
+        schema="convoy.result.v1", campaign_id=campaign_id, success=False,
+        reason_code=reason, detail=detail, chunk_index=chunk_index,
+        battery=round(battery), network_quality=NETWORK_QUALITY,
+    ), qos=1)
+    active = None
+    state["resume"] = None
+    save_state(state)
+
+
+def handle_offer(client: mqtt.Client, wire: dict) -> None:
+    global active, injector
+
+    try:
+        manifest = ota.verify_offer(
+            wire, server_public_key(), device_id=DEVICE_ID,
+            min_allowed_version_code=state.get("min_allowed_version_code", 0))
+    except ManifestRejected as exc:
+        campaign_id = (wire.get("manifest") or {}).get("campaign_id", "unknown")
+        log.error("offer REJECTED: %s", exc)
+        client.publish(T_OTA_ACK, envelope(
+            schema="convoy.ack.v1", campaign_id=campaign_id, accepted=False,
+            reason_code=exc.reason, detail=exc.detail), qos=1)
+        return
+
+    campaign_id = manifest["campaign_id"]
+    log.info("offer verified: v%s -> %d chunks, %d bytes",
+             manifest["version"], manifest["chunk_count"], manifest["size"])
+
+    injector = FailureInjector(FAILURE_MODE, FAILURE_PROBABILITY,
+                               manifest["chunk_count"])
+
+    # Local safety gate. The server already checked eligibility, but conditions
+    # change between the check and the offer arriving, and the device is the
+    # last authority on its own state.
+    injected = injector.at_offer(round(battery), NETWORK_QUALITY, manifest)
+    if injected:
+        client.publish(T_OTA_ACK, envelope(
+            schema="convoy.ack.v1", campaign_id=campaign_id, accepted=False,
+            reason_code=injected,
+            detail=f"battery {round(battery)}% below "
+                   f"{manifest['min_battery']}% minimum"), qos=1)
+        fail_update(client, campaign_id, injected,
+                    f"battery {round(battery)}% < {manifest['min_battery']}%")
+        return
+
+    if round(battery) < manifest["min_battery"]:
+        reason = ReasonCode.FAILED_LOW_BATTERY
+        client.publish(T_OTA_ACK, envelope(
+            schema="convoy.ack.v1", campaign_id=campaign_id, accepted=False,
+            reason_code=reason), qos=1)
+        fail_update(client, campaign_id, reason,
+                    f"battery {round(battery)}% < {manifest['min_battery']}%")
+        return
+
+    active = Download(
+        campaign_id=campaign_id, firmware_id=manifest["firmware_id"],
+        version=manifest["version"], version_code=manifest["version_code"],
+        chunk_count=manifest["chunk_count"], sha256=manifest["sha256"],
+        chunk_hashes=manifest["chunk_hashes"], nonce=manifest["nonce"],
+    )
+    client.publish(T_OTA_ACK, envelope(
+        schema="convoy.ack.v1", campaign_id=campaign_id, accepted=True,
+        nonce=manifest["nonce"]), qos=1)
+    log.info("offer ACCEPTED, awaiting chunks")
+
+
+def handle_chunk(client: mqtt.Client, payload: dict) -> None:
+    global active
+
+    if active is None or payload.get("campaign_id") != active.campaign_id:
+        return  # stray chunk from a cancelled or previous campaign
+
+    index, data, sha = ota.decode_chunk(payload)
+
+    injected = injector.at_chunk(index) if injector else None
+    if injected:
+        fail_update(client, active.campaign_id, injected,
+                    f"link failed at chunk {index}/{active.chunk_count}", index)
+        return
+
+    if injector:
+        data = injector.corrupt(index, data)
+
+    try:
+        active.accept_chunk(index, data, sha)
+    except ManifestRejected as exc:
+        fail_update(client, active.campaign_id, exc.reason, exc.detail, index)
+        return
+
+    client.publish(T_OTA_PROGRESS, envelope(
+        schema="convoy.progress.v1", campaign_id=active.campaign_id,
+        chunk_index=index, chunk_count=active.chunk_count,
+        percent=round(active.percent, 1)), qos=1)
+
+    # Persist resume state periodically, not per chunk: a write every chunk
+    # would dominate the transfer cost, and losing at most 8 chunks of progress
+    # is an acceptable trade for a download measured in seconds.
+    if index % 8 == 0 or active.complete:
+        state["resume"] = {"campaign_id": active.campaign_id,
+                           "firmware_id": active.firmware_id,
+                           "next_chunk": active.next_index}
+        save_state(state)
+
+    if active.complete:
+        install(client)
+
+
+def install(client: mqtt.Client) -> None:
+    """Verify the whole image, then swap slots.
+
+    The simulated device does what a real one does in the same order: hash the
+    complete image, mark the inactive slot bootable, record the new version,
+    and only then report success. The A/B slot swap is symbolic here but the
+    ORDER is what matters -- the previous version is never discarded until the
+    new one is verified.
+    """
+    global active
+    assert active is not None
+    campaign_id = active.campaign_id
+
+    try:
+        image = active.assemble()
+    except ManifestRejected as exc:
+        fail_update(client, campaign_id, exc.reason, exc.detail)
+        return
+
+    injected = injector.at_install() if injector else None
+    if injected:
+        fail_update(client, campaign_id, injected, "flash write error")
+        return
+
+    previous_slot = state.get("active_slot", "A")
+    new_slot = "B" if previous_slot == "A" else "A"
+
+    state["previous_version"] = state["current_version"]
+    state["current_version"] = active.version
+    state["min_allowed_version_code"] = active.version_code
+    state["active_slot"] = new_slot
+    state["resume"] = None
+    save_state(state)
+
+    log.info("INSTALLED v%s (%d bytes) slot %s -> %s",
+             active.version, len(image), previous_slot, new_slot)
+
+    client.publish(T_OTA_RESULT, envelope(
+        schema="convoy.result.v1", campaign_id=campaign_id, success=True,
+        reason_code=ReasonCode.SUCCESS, version=active.version,
+        active_slot=new_slot, battery=round(battery),
+        network_quality=NETWORK_QUALITY), qos=1)
+
+    active = None
+    publish_hello(client, trigger="post_install")
 
 
 # ---------------------------------------------------------------- heartbeat --

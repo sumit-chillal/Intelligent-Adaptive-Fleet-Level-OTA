@@ -68,7 +68,12 @@ class SeenCache:
 
 
 class MqttBridge:
-    def __init__(self) -> None:
+    def __init__(self, orchestrator=None) -> None:
+        # Set after construction: the orchestrator needs the bridge to publish,
+        # and the bridge needs the orchestrator to route OTA messages. The
+        # bridge stays usable with orchestrator=None so the transport can be
+        # run and debugged on its own.
+        self.orchestrator = orchestrator
         self._client: aiomqtt.Client | None = None
         self._seen = SeenCache()
         self._stop = asyncio.Event()
@@ -76,6 +81,7 @@ class MqttBridge:
         self.messages_rejected = 0
         self._db_down_logged = False
         self._db_faults_logged: set[str] = set()
+        self._pending_ota: list[tuple[str, str, dict]] = []
 
     # ------------------------------------------------------------ lifecycle
     async def run(self) -> None:
@@ -201,6 +207,7 @@ class MqttBridge:
             await self._handle(parsed.device_id, parsed.leaf, payload)
             self.messages_handled += 1
             self._db_down_logged = False
+            await self._drain_ota()
         except ValidationError as exc:
             self.messages_rejected += 1
             log.warning("message_failed_validation", topic=topic_str,
@@ -264,12 +271,35 @@ class MqttBridge:
                 pass  # latency probe only; nothing to persist
 
             elif leaf.startswith("ota/"):
-                # Phase 2B-3. Logged now so it is visible that the topics are
-                # live and reaching the bridge before the handlers exist.
-                log.info("ota_message_received", device_id=device_id, leaf=leaf)
+                if self.orchestrator is None:
+                    log.debug("ota_message_ignored", device_id=device_id, leaf=leaf,
+                              reason="no orchestrator attached")
+                    return
+                # OTA handling runs OUTSIDE this session scope. The orchestrator
+                # opens its own transactions, and nesting them here would hold a
+                # connection open across chunk streaming.
+                self._pending_ota.append((device_id, leaf, payload))
 
             else:
                 log.debug("unhandled_leaf", device_id=device_id, leaf=leaf)
+
+    async def _drain_ota(self) -> None:
+        """Route queued OTA messages to the orchestrator."""
+        while self._pending_ota:
+            device_id, leaf, payload = self._pending_ota.pop(0)
+            try:
+                if leaf == DeviceLeaf.OTA_ACK:
+                    await self.orchestrator.handle_ack(device_id, payload)
+                elif leaf == DeviceLeaf.OTA_PROGRESS:
+                    await self.orchestrator.handle_progress(device_id, payload)
+                elif leaf == DeviceLeaf.OTA_RESUME:
+                    await self.orchestrator.handle_resume(device_id, payload)
+                elif leaf == DeviceLeaf.OTA_RESULT:
+                    await self.orchestrator.handle_result(device_id, payload)
+                else:
+                    log.debug("unhandled_ota_leaf", device_id=device_id, leaf=leaf)
+            except Exception:
+                log.exception("ota_handler_failed", device_id=device_id, leaf=leaf)
 
     # -------------------------------------------------------------- reaper --
     async def run_offline_reaper(self, interval_s: int = 5) -> None:

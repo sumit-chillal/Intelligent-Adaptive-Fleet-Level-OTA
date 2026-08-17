@@ -228,6 +228,43 @@ async def cmd_campaign_create(args) -> int:
     return 0
 
 
+async def cmd_campaign_start(args) -> int:
+    """Flip a campaign to RUNNING. The orchestrator picks it up on its next tick.
+
+    Deliberately just a state change: starting a rollout from the CLI and
+    having it run inside the bridge process means there is exactly one
+    orchestrator, which is the invariant that stops two schedulers
+    double-offering to the same device.
+    """
+    async with session_scope() as session:
+        campaign = await session.scalar(
+            select(Campaign).where(Campaign.campaign_id == args.campaign))
+        if campaign is None:
+            print(f"{R}unknown campaign {args.campaign!r}{RESET}")
+            return 1
+        if campaign.state not in ("DRAFT", "PAUSED"):
+            print(f"{R}campaign is {campaign.state}{RESET} — only DRAFT or "
+                  f"PAUSED campaigns can be started.")
+            return 1
+        campaign.state = "RUNNING"
+        print(f"\n  {G}campaign {campaign.campaign_id} is now RUNNING{RESET}")
+        print(f"  Watch the bridge terminal — the orchestrator opens the "
+              f"canary batch within a couple of seconds.\n")
+    return 0
+
+
+async def cmd_campaign_pause(args) -> int:
+    async with session_scope() as session:
+        campaign = await session.scalar(
+            select(Campaign).where(Campaign.campaign_id == args.campaign))
+        if campaign is None:
+            print(f"{R}unknown campaign{RESET}")
+            return 1
+        campaign.state = "PAUSED"
+        print(f"{Y}paused{RESET} {campaign.campaign_id}")
+    return 0
+
+
 async def cmd_campaign_list(_args) -> int:
     async with session_scope() as session:
         rows = list(await session.scalars(
@@ -278,6 +315,8 @@ COMMANDS = {
     "firmware:delete": cmd_firmware_delete,
     "campaign:dryrun": cmd_campaign_dryrun,
     "campaign:create": cmd_campaign_create,
+    "campaign:start": cmd_campaign_start,
+    "campaign:pause": cmd_campaign_pause,
     "campaign:list": cmd_campaign_list,
     "campaign:show": cmd_campaign_show,
 }
@@ -321,6 +360,11 @@ def build_parser() -> argparse.ArgumentParser:
             # Memory.md D15: the demo needs 0.50, not the 0.40 default.
             c.add_argument("--abort-threshold", type=float,
                            help="failure rate that aborts the campaign (demo: 0.5)")
+
+    for nm, hlp in [("campaign:start", "set a campaign RUNNING"),
+                    ("campaign:pause", "hold a running campaign")]:
+        c = sub.add_parser(nm, help=hlp)
+        c.add_argument("--campaign", required=True)
 
     sub.add_parser("campaign:list", help="list campaigns")
     show = sub.add_parser("campaign:show", help="campaign detail")

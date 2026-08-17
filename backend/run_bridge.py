@@ -35,6 +35,7 @@ from sqlalchemy import func, select
 from app.config import settings
 from app.db.models import Device, DeviceEvent
 from app.db.session import check_connection, dispose_engine, session_scope
+from app.core.orchestrator import Orchestrator
 from app.mqtt.bridge import MqttBridge
 
 
@@ -127,9 +128,17 @@ async def main() -> int:
     log.info("database_ok")
 
     bridge = MqttBridge()
+    orchestrator = Orchestrator(bridge)
+    # Circular by nature: the orchestrator publishes through the bridge, and
+    # the bridge routes device replies to the orchestrator. Wiring it after
+    # construction keeps each usable alone -- the bridge runs fine with no
+    # orchestrator, which is how Phase 2B-2 was debugged.
+    bridge.orchestrator = orchestrator
+
     tasks = [
         asyncio.create_task(bridge.run(), name="bridge"),
         asyncio.create_task(bridge.run_offline_reaper(), name="reaper"),
+        asyncio.create_task(orchestrator.run(), name="orchestrator"),
         asyncio.create_task(fleet_summary(), name="summary"),
     ]
 
@@ -143,6 +152,7 @@ async def main() -> int:
              handled=bridge.messages_handled, rejected=bridge.messages_rejected)
 
     await bridge.stop()
+    await orchestrator.stop()
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

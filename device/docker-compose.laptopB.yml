@@ -20,6 +20,9 @@ x-tcu: &tcu
     FLEET_TAG: laptopB
     FAILURE_MODE: none
     BATTERY_JITTER: 1
+    # Comes from .env; declared here so every container inherits it and a
+    # missing key fails loudly at startup rather than at offer time.
+    SERVER_PUBLIC_KEY_HEX: ${SERVER_PUBLIC_KEY_HEX}
     NETWORK_JITTER: 0
 
 services:
