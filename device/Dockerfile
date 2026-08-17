@@ -14,7 +14,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY tcu_agent.py .
+# Every application module, not just the entrypoint. Listing files one by one
+# means a new module silently fails to ship -- which is exactly what happened
+# when ota.py was added and every container crashed with ModuleNotFoundError.
+COPY tcu_agent.py ota.py ./
 
 # Resume state lives in /data. A named volume is mounted here by compose, so a
 # container killed mid-download resumes at its last verified chunk instead of
