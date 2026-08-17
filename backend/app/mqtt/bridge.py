@@ -82,6 +82,11 @@ class MqttBridge:
         self._db_down_logged = False
         self._db_faults_logged: set[str] = set()
         self._pending_ota: list[tuple[str, str, dict]] = []
+        # Set once connected, subscribed, and the fleet has been asked to
+        # re-announce. The orchestrator waits on this: acting on device state
+        # before we have heard from anyone means judging the fleet on stale
+        # data, and every device looks offline.
+        self.ready = asyncio.Event()
 
     # ------------------------------------------------------------ lifecycle
     async def run(self) -> None:
@@ -98,6 +103,10 @@ class MqttBridge:
                 await self._session()
                 backoff = 1
             except aiomqtt.MqttError as exc:
+                # Not ready any more: a reconnect means we may have missed
+                # status changes while disconnected, so the orchestrator must
+                # pause and re-warm rather than act on a stale picture.
+                self.ready.clear()
                 log.warning("broker_connection_lost", error=str(exc),
                             retry_in_s=backoff)
                 await asyncio.sleep(backoff)
@@ -142,6 +151,8 @@ class MqttBridge:
             # starts after the devices has no idea what version anything runs,
             # because `hello` was published before we were listening.
             await self.announce_all()
+
+            self.ready.set()
 
             async for message in client.messages:
                 if self._stop.is_set():

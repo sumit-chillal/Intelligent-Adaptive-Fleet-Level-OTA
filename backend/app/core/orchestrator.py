@@ -81,10 +81,37 @@ class Orchestrator:
         self._key = None
         self._stream_tasks: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
+        self._warmed = False
 
     # ------------------------------------------------------------ lifecycle
     async def run(self, interval_s: float = 2.0) -> None:
+        """Tick forever, but never on a stale picture of the fleet.
+
+        The orchestrator's first act on a batch is to judge every target's
+        health, and that judgement is only as good as the last heartbeat in the
+        database. On a cold start those rows can be hours old -- the bridge has
+        not connected yet, no device has said anything, and every target looks
+        offline. Opening a batch in that window marks the whole fleet
+        SKIPPED_OFFLINE and completes the campaign having done nothing.
+
+        So: wait for the broker connection, then wait one warm-up window on top
+        so every online device has heartbeated at least once. The same applies
+        after a reconnect, because status changes during the outage were missed.
+        """
         while not self._stop.is_set():
+            if not self.bridge.ready.is_set():
+                self._warmed = False
+                log.info("orchestrator_waiting_for_broker")
+                await self.bridge.ready.wait()
+
+            if not self._warmed:
+                log.info("orchestrator_warming_up",
+                         seconds=settings.orchestrator_warmup_seconds,
+                         why="letting devices report before judging their health")
+                await asyncio.sleep(settings.orchestrator_warmup_seconds)
+                self._warmed = True
+                log.info("orchestrator_ready")
+
             try:
                 await self.tick()
             except Exception:

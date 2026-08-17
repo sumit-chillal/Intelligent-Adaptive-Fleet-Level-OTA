@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     chunk_size_bytes: int = 8192
     chunk_window: int = 8
     device_offline_ttl_seconds: int = 20
+    # How long the orchestrator waits after the broker connects before it will
+    # judge any device's health. Must comfortably exceed one heartbeat interval
+    # so every online device has reported at least once.
+    orchestrator_warmup_seconds: int = 12
     batch_timeout_seconds: int = 180
     max_attempts_per_device: int = 3
 
