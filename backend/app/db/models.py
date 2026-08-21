@@ -238,6 +238,15 @@ class CampaignTarget(Base):
     last_chunk_index: Mapped[int] = mapped_column(Integer, default=-1)
     offer_nonce: Mapped[str | None] = mapped_column(String(64))
 
+    # How many times this device was passed over for a TRANSIENT reason
+    # (offline, low battery, weak signal) rather than attempted.
+    #
+    # Separate from `attempts` on purpose: an attempt is a real update that
+    # happened and can inform the failure rate, while a deferral is the system
+    # declining to try. Conflating them would let a parked car's overnight
+    # unavailability exhaust its retry budget.
+    deferrals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

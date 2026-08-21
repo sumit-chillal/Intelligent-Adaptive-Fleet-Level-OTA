@@ -69,6 +69,12 @@ from app.services.ingest import Ingestor
 
 log = structlog.get_logger(__name__)
 
+# How many times a device may be passed over for a transient reason before the
+# campaign gives up on it. Three passes is enough to survive a broker reconnect
+# or a device rebooting, without keeping a rollout open for a machine that is
+# switched off.
+MAX_DEFERRALS = 3
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -236,6 +242,7 @@ class Orchestrator:
                 target.state = str(TargetState.SKIPPED)
                 target.last_reason_code = str(result.reason)
                 target.ended_at = _now()
+                target.deferrals += 1
                 batch.skipped_count += 1
                 await ingestor.record_event(
                     device_id=device.device_id, campaign_id=campaign.campaign_id,
@@ -253,13 +260,34 @@ class Orchestrator:
                 min_network_quality=campaign.min_network_quality)
             signed = sign_manifest(manifest, key)
 
+            # Publishing can fail: the broker connection may have dropped
+            # between the health check and this call. Letting that exception
+            # escape would abort the ENTIRE batch and roll back every offer
+            # already sent in it, so one flaky publish costs fifteen devices
+            # their turn. Contain it to the device it affects.
+            try:
+                await self.bridge.publish(
+                    topics.server_topic(device.device_id, topics.ServerLeaf.OTA_OFFER),
+                    signed.to_wire())
+            except Exception as exc:
+                target.state = str(TargetState.SKIPPED)
+                target.last_reason_code = str(ReasonCode.SKIPPED_OFFLINE)
+                target.deferrals += 1
+                target.ended_at = _now()
+                batch.skipped_count += 1
+                await ingestor.record_event(
+                    device_id=device.device_id, campaign_id=campaign.campaign_id,
+                    batch_id=batch.id, event_type=EventType.OFFER_REJECTED,
+                    reason_code=str(ReasonCode.SKIPPED_OFFLINE), source="server",
+                    payload={"detail": f"offer publish failed: {exc}",
+                             "deferrals": target.deferrals})
+                log.warning("offer_publish_failed", device_id=device.device_id,
+                            error=str(exc)[:120])
+                continue
+
             target.state = str(TargetState.OFFERED)
             target.attempts += 1
             target.offer_nonce = manifest["nonce"]
-
-            await self.bridge.publish(
-                topics.server_topic(device.device_id, topics.ServerLeaf.OTA_OFFER),
-                signed.to_wire())
             await ingestor.record_event(
                 device_id=device.device_id, campaign_id=campaign.campaign_id,
                 batch_id=batch.id, event_type=EventType.OFFER_SENT,
@@ -577,6 +605,35 @@ class Orchestrator:
                          "resume_from_chunk": target.last_chunk_index + 1})
             log.info("retry_scheduled", device_id=target.device_id,
                      attempt=target.attempts + 1, of=campaign.max_attempts,
+                     reason=target.last_reason_code)
+
+        # Transient skips get another chance. A device passed over because it
+        # was offline, or its battery was low, has not failed -- the system
+        # declined to try. In a real fleet that device is a parked car, and it
+        # should be offered the update on a later pass rather than written off,
+        # which is what happened when a broker reconnect marked two healthy
+        # devices SKIPPED_OFFLINE and the campaign completed without them.
+        #
+        # Bounded by max_deferrals so a permanently absent device cannot keep a
+        # campaign open forever.
+        deferred = list(await session.scalars(
+            select(CampaignTarget).where(
+                CampaignTarget.campaign_id == campaign.campaign_id,
+                CampaignTarget.batch_id == batch.id,
+                CampaignTarget.state == str(TargetState.SKIPPED))))
+        for target in deferred:
+            transient = target.last_reason_code in (
+                str(ReasonCode.SKIPPED_OFFLINE),
+                str(ReasonCode.SKIPPED_INELIGIBLE_LOW_BATTERY),
+                str(ReasonCode.SKIPPED_INELIGIBLE_POOR_NETWORK),
+            )
+            if not transient or target.deferrals >= MAX_DEFERRALS:
+                continue
+            target.state = str(TargetState.PENDING)
+            target.batch_id = None
+            target.ended_at = None
+            log.info("target_deferred", device_id=target.device_id,
+                     deferral=target.deferrals, of=MAX_DEFERRALS,
                      reason=target.last_reason_code)
 
         # Push the re-queued rows to the database before asking whether any
