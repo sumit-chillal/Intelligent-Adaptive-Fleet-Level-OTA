@@ -87,6 +87,7 @@ class MqttBridge:
         # before we have heard from anyone means judging the fleet on stale
         # data, and every device looks offline.
         self.ready = asyncio.Event()
+        self._backoff = 1
 
     # ------------------------------------------------------------ lifecycle
     async def run(self) -> None:
@@ -97,26 +98,26 @@ class MqttBridge:
         logged, so a flaky venue network shows up in the logs instead of
         looking like devices going quiet.
         """
-        backoff = 1
+        self._backoff = 1
         while not self._stop.is_set():
             try:
                 await self._session()
-                backoff = 1
+                self._backoff = 1
             except aiomqtt.MqttError as exc:
                 # Not ready any more: a reconnect means we may have missed
                 # status changes while disconnected, so the orchestrator must
                 # pause and re-warm rather than act on a stale picture.
                 self.ready.clear()
                 log.warning("broker_connection_lost", error=str(exc),
-                            retry_in_s=backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                            retry_in_s=self._backoff)
+                await asyncio.sleep(self._backoff)
+                self._backoff = min(self._backoff * 2, 30)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("bridge_unexpected_error", retry_in_s=backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                log.exception("bridge_unexpected_error", retry_in_s=self._backoff)
+                await asyncio.sleep(self._backoff)
+                self._backoff = min(self._backoff * 2, 30)
 
     async def _session(self) -> None:
         tls = ssl.create_default_context()  # verification ON (Rules.md §6)
@@ -153,6 +154,17 @@ class MqttBridge:
             await self.announce_all()
 
             self.ready.set()
+            # Reset the retry delay HERE, on a successful connection -- not
+            # after _session() returns, because _session() only returns when
+            # the bridge is shutting down. Resetting there meant every
+            # reconnect doubled the delay from the previous one, so a client
+            # that reconnected cleanly five times was waiting 16 s before the
+            # sixth attempt despite never having failed twice in a row.
+            #
+            # Backoff should measure CONSECUTIVE failures. A connection that
+            # succeeded and later dropped is a new incident, not a continuation
+            # of the last one.
+            self._backoff = 1
 
             async for message in client.messages:
                 if self._stop.is_set():
