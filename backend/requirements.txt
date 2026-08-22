@@ -30,3 +30,8 @@ pytest-cov==5.0.0
 # ---- Phase 2B-2: broker ingestion ------------------------------------------
 aiomqtt==2.3.0
 structlog==24.4.0
+
+# ---- Phase 3: API + realtime -----------------------------------------------
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+websockets==13.0.1

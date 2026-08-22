@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -250,6 +251,7 @@ async def cmd_campaign_start(args) -> int:
                   f"PAUSED campaigns can be started.")
             return 1
         campaign.state = "RUNNING"
+        campaign.started_at = campaign.started_at or datetime.now(timezone.utc)
         print(f"\n  {G}campaign {campaign.campaign_id} is now RUNNING{RESET}")
         print(f"  Watch the bridge terminal — the orchestrator opens the "
               f"canary batch within a couple of seconds.\n")

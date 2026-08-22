@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   CONVOY — "Hangar Daylight"
+
+   A cool concrete canvas rather than black, so the dashboard survives a bright
+   lecture hall and a projector with poor black levels.
+
+   Signal colours are a SYSTEM, not decoration: each hue means exactly one
+   thing and appears nowhere else. --govern (amber) is reserved entirely for
+   the adaptive engine and operator holds, which is what makes the system's
+   intelligence legible — when amber appears on screen, the machine decided
+   something.
+   ========================================================================== */
+:root {
+  --concrete: #e7eaee;
+  --panel: #f9fafb;
+  --ink: #0f1319;
+  --ink-mute: #5b6472;
+  --rule: #c3cad4;
+
+  --transit: #1f5fd8;  /* IN FLIGHT  — downloading / installing */
+  --verified: #0b7a5c; /* VERIFIED   — installed and confirmed  */
+  --fault: #c22b1b;    /* FAILED                                */
+  --govern: #b45309;   /* the engine acted / campaign held      */
+  --dormant: #8b94a1;  /* idle, offline, skipped                */
+}
+
+/* Hangar Night. Same hues lifted for legibility on a dark surface. */
+[data-theme="night"] {
+  --concrete: #141922;
+  --panel: #1b222c;
+  --ink: #eef1f5;
+  --ink-mute: #97a1b0;
+  --rule: #2c3644;
+  --transit: #5b8ff0;
+  --verified: #2fa383;
+  --fault: #e2594a;
+  --govern: #e0912c;
+  --dormant: #6b7686;
+}
+
+html,
+body {
+  background: var(--concrete);
+  color: var(--ink);
+  font-family: var(--font-body), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Archivo is loaded as a variable font, so the expanded width that gives the
+   display face its instrument-panel character is set here rather than by
+   picking a static cut. */
+.font-display {
+  font-variation-settings: "wdth" 112;
+}
+
+/* The display face is Archivo's variable font. Expanding the width axis is
+   what gives it the silkscreened instrument-panel character described in
+   Design.md -- narrow grotesques read as web-app chrome, wide ones read as
+   equipment labelling. */
+.font-display {
+  font-variation-settings: "wdth" 118;
+  font-weight: 700;
+}
+
+/* Silkscreen legend. Structural, used for section labels only. */
+.legend {
+  font-family: var(--font-display), sans-serif;
+  font-variation-settings: "wdth" 108;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* Instrument panels are separated by hairlines on a flat surface, not by
+   shadows. Elevation is reserved for the device drawer. */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+}
+
+.rule-t {
+  border-top: 1px solid var(--rule);
+}
+
+/* The one orchestrated moment: an adaptive decision arriving.
+   Everything else on the page holds still. */
+@keyframes sweep {
+  from {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  to {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+}
+.decision-sweep {
+  animation: sweep 400ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes stamp {
+  from {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.decision-stamp {
+  animation: stamp 120ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .decision-sweep,
+  .decision-stamp {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--transit);
+  outline-offset: 2px;
+}

@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import EventType
 from app.db.models import Device, DeviceEvent, DeviceHealthSample
 from app.schemas.mqtt import HealthMessage, HelloMessage, StatusMessage
+from app.services.eventbus import Channel, bus
 
 log = structlog.get_logger(__name__)
 
@@ -86,6 +87,15 @@ class Ingestor:
             stmt = stmt.on_conflict_do_nothing(index_elements=[DeviceEvent.msg_id])
         await self.session.execute(stmt)
 
+        # Push to the live bus as well as the log. The database is the record;
+        # the bus is the notification.
+        bus.publish(Channel.EVENT, {
+            "device_id": device_id, "campaign_id": campaign_id,
+            "event_type": str(event_type), "reason_code": reason_code,
+            "battery": battery, "network_quality": network_quality,
+            "payload": payload,
+        })
+
     # -------------------------------------------------------------- hello --
     async def handle_hello(self, device_id: str, msg: HelloMessage) -> bool:
         """Register or refresh a device. Returns True if newly registered."""
@@ -132,6 +142,12 @@ class Ingestor:
                 "resume_pending": msg.resume_pending,
             },
         )
+        bus.publish(Channel.DEVICE, {
+            "device_id": device_id, "online": True,
+            "current_version": msg.current_version, "battery": msg.battery,
+            "network_quality": msg.network_quality, "fleet_tag": msg.fleet_tag,
+            "model": msg.model, "new": is_new,
+        })
         return is_new
 
     # ------------------------------------------------------------- health --
@@ -150,6 +166,12 @@ class Ingestor:
             uptime_s=msg.uptime_s,
             ts=_utcnow(),
         ))
+
+        bus.publish(Channel.HEALTH, {
+            "device_id": device_id, "battery": msg.battery,
+            "network_quality": msg.network_quality,
+            "current_version": msg.current_version, "online": True,
+        })
 
         result = await self.session.execute(
             update(Device)
@@ -188,6 +210,8 @@ class Ingestor:
             .values(online=msg.online,
                     **({"last_seen_at": _utcnow()} if msg.online else {}))
         )
+        bus.publish(Channel.DEVICE, {"device_id": device_id, "online": msg.online,
+                                     "reason": msg.reason})
         await self.record_event(
             device_id=device_id,
             event_type=EventType.DEVICE_ONLINE if msg.online else EventType.DEVICE_OFFLINE,
