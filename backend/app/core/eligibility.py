@@ -54,6 +54,10 @@ class EligibilityPolicy:
     min_network_quality: int = 2
     target_version_code: int = 0
     offline_ttl_seconds: float = 20.0
+    # A rollback moves devices BACKWARDS. Every version check below has to
+    # know which direction "done" is, or a rollback campaign would skip the
+    # entire fleet as already-up-to-date.
+    is_rollback: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,10 +80,29 @@ def evaluate(device: DeviceSnapshot, policy: EligibilityPolicy) -> EligibilityRe
     # 1. Already done. Cheapest possible answer, and it must come first:
     #    re-offering firmware a device already runs would waste a batch slot
     #    and, worse, count as a real attempt in the failure-rate maths.
-    if device.current_version_code >= policy.target_version_code > 0:
-        return EligibilityResult(
-            False, ReasonCode.SKIPPED_ALREADY_ON_TARGET,
-            f"already on version_code {device.current_version_code}")
+    #
+    #    "Done" means something different for a rollback. A normal campaign is
+    #    done when the device is at or above the target; a rollback is done
+    #    only when it is exactly AT the target, because a device on a lower
+    #    version than the rollback target was never affected by the bad
+    #    release and must not be dragged along by the recovery.
+    if policy.target_version_code > 0:
+        if policy.is_rollback:
+            if device.current_version_code == policy.target_version_code:
+                return EligibilityResult(
+                    False, ReasonCode.SKIPPED_ALREADY_ON_TARGET,
+                    f"already on the rollback target "
+                    f"(version_code {device.current_version_code})")
+            if device.current_version_code < policy.target_version_code:
+                return EligibilityResult(
+                    False, ReasonCode.SKIPPED_ALREADY_ON_TARGET,
+                    f"on version_code {device.current_version_code}, below the "
+                    f"rollback target {policy.target_version_code}; never "
+                    f"received the version being rolled back")
+        elif device.current_version_code >= policy.target_version_code:
+            return EligibilityResult(
+                False, ReasonCode.SKIPPED_ALREADY_ON_TARGET,
+                f"already on version_code {device.current_version_code}")
 
     # 2. Reachable. An offer to an offline device is a message into the void
     #    that will time out and pollute the batch.

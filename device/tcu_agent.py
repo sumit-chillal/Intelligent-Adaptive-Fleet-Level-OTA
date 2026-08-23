@@ -288,6 +288,7 @@ def on_message(client, _userdata, msg: mqtt.MQTTMessage):
 # --------------------------------------------------------------------- OTA --
 active: Download | None = None
 injector: FailureInjector | None = None
+is_rollback: bool = False
 
 
 def server_public_key() -> Ed25519PublicKey:
@@ -366,6 +367,11 @@ def handle_offer(client: mqtt.Client, wire: dict) -> None:
         chunk_count=manifest["chunk_count"], sha256=manifest["sha256"],
         chunk_hashes=manifest["chunk_hashes"], nonce=manifest["nonce"],
     )
+    global is_rollback
+    is_rollback = bool(manifest.get("rollback", False))
+    if is_rollback:
+        log.warning("this offer is a ROLLBACK to v%s (from v%s)",
+                    manifest["version"], state["current_version"])
     client.publish(T_OTA_ACK, envelope(
         schema="convoy.ack.v1", campaign_id=campaign_id, accepted=True,
         nonce=manifest["nonce"]), qos=1)
@@ -438,9 +444,15 @@ def install(client: mqtt.Client) -> None:
         return
 
     previous_slot = state.get("active_slot", "A")
+    previous_version = state["current_version"]
+    previous_code = state.get("min_allowed_version_code", 0)
     new_slot = "B" if previous_slot == "A" else "A"
 
-    state["previous_version"] = state["current_version"]
+    # Write the new slot and point the bootloader at it. The PREVIOUS slot is
+    # deliberately left intact -- that is the whole point of A/B, and it is
+    # what makes the next few lines survivable.
+    state["previous_version"] = previous_version
+    state["previous_slot"] = previous_slot
     state["current_version"] = active.version
     state["min_allowed_version_code"] = active.version_code
     state["active_slot"] = new_slot
@@ -450,9 +462,38 @@ def install(client: mqtt.Client) -> None:
     log.info("INSTALLED v%s (%d bytes) slot %s -> %s",
              active.version, len(image), previous_slot, new_slot)
 
+    # ---- self-confirmation -------------------------------------------------
+    # A real device reboots here and the new image must announce itself within
+    # a watchdog window. An image that writes and verifies perfectly can still
+    # fail to run: the bytes are exactly what the server sent, they just do not
+    # work on this hardware. Hashes and signatures cannot catch that. Only
+    # keeping the old slot and requiring the new one to prove itself can.
+    if injector and injector.breaks_boot():
+        log.error("NEW IMAGE FAILED TO BOOT — reverting to v%s (slot %s)",
+                  previous_version, previous_slot)
+        state["current_version"] = previous_version
+        state["active_slot"] = previous_slot
+        state["min_allowed_version_code"] = previous_code
+        state["previous_version"] = None
+        save_state(state)
+
+        client.publish(T_OTA_RESULT, envelope(
+            schema="convoy.result.v1", campaign_id=campaign_id, success=False,
+            reason_code=ReasonCode.ROLLED_BACK_AUTOMATIC,
+            version=previous_version, active_slot=previous_slot,
+            detail=f"v{active.version} did not confirm; reverted",
+            battery=round(battery), network_quality=NETWORK_QUALITY), qos=1)
+        active = None
+        publish_hello(client, trigger="auto_rollback")
+        return
+
+    outcome = ReasonCode.ROLLED_BACK_MANUAL if is_rollback else ReasonCode.SUCCESS
+    if is_rollback:
+        log.warning("ROLLED BACK to v%s", active.version)
+
     client.publish(T_OTA_RESULT, envelope(
-        schema="convoy.result.v1", campaign_id=campaign_id, success=True,
-        reason_code=ReasonCode.SUCCESS, version=active.version,
+        schema="convoy.result.v1", campaign_id=campaign_id,
+        success=not is_rollback, reason_code=outcome, version=active.version,
         active_slot=new_slot, battery=round(battery),
         network_quality=NETWORK_QUALITY), qos=1)
 

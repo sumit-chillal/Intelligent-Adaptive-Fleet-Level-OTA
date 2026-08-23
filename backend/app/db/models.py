@@ -174,6 +174,17 @@ class Campaign(Base):
     selector: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     state: Mapped[str] = mapped_column(String(16), default="DRAFT", nullable=False)
 
+    # A rollback is a campaign like any other -- same batching, same
+    # eligibility gate, same audit trail, same adaptive engine. The only
+    # differences are that the manifest carries a signed rollback flag (so
+    # devices accept a LOWER version_code past their anti-rollback floor) and
+    # that "already done" inverts direction.
+    #
+    # Modelling it as a separate mechanism would have meant duplicating the
+    # orchestrator, and a recovery path that shares no code with the normal
+    # path is a recovery path nobody has tested.
+    is_rollback: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     # ---- rollout policy: every knob the adaptive engine reads --------------
     batch_size_initial: Mapped[int] = mapped_column(Integer, default=5)
     batch_size_min: Mapped[int] = mapped_column(Integer, default=1)

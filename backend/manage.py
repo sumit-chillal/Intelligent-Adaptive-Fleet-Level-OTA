@@ -32,7 +32,7 @@ from sqlalchemy import select
 
 from app.core.crypto import sign_manifest
 from app.core.firmware import build_manifest
-from app.db.models import Campaign, Device, Firmware
+from app.db.models import Campaign, CampaignTarget, Device, Firmware
 from app.db.session import check_connection, dispose_engine, session_scope
 from app.services import campaign_service as cs
 from app.services import firmware_service as fs
@@ -270,6 +270,40 @@ async def cmd_campaign_pause(args) -> int:
     return 0
 
 
+async def cmd_campaign_rollback(args) -> int:
+    """Create a rollback campaign returning a bad release to a known build."""
+    from app.core.orchestrator import Orchestrator
+
+    orch = Orchestrator(bridge=None)  # no publishing; creation only
+    try:
+        new_id = await orch.rollback_campaign(
+            args.campaign, args.to_firmware, name=args.name,
+            batch_size=args.batch_size)
+    except ValueError as exc:
+        print(f"{R}{exc}{RESET}")
+        return 1
+
+    async with session_scope() as session:
+        campaign = await session.scalar(
+            select(Campaign).where(Campaign.campaign_id == new_id))
+        firmware = await session.scalar(
+            select(Firmware).where(Firmware.firmware_id == args.to_firmware))
+        count = len(list(await session.scalars(
+            select(CampaignTarget.device_id).where(
+                CampaignTarget.campaign_id == new_id))))
+
+    print(f"\n  {Y}ROLLBACK campaign created{RESET}")
+    print(f"  campaign_id      {new_id}")
+    print(f"  rolling back     {args.campaign}")
+    print(f"  to version       {firmware.version}")
+    print(f"  devices          {count} (only those the original UPDATED)")
+    print(f"  batch size       {campaign.batch_size_initial}  (no canary — "
+          f"the target is a build these devices already ran)")
+    print(f"\n  state is DRAFT. Start it when you are ready:")
+    print(f"      python manage.py campaign:start --campaign {new_id}\n")
+    return 0
+
+
 async def cmd_campaign_list(_args) -> int:
     async with session_scope() as session:
         rows = list(await session.scalars(
@@ -320,6 +354,7 @@ COMMANDS = {
     "firmware:delete": cmd_firmware_delete,
     "campaign:dryrun": cmd_campaign_dryrun,
     "campaign:create": cmd_campaign_create,
+    "campaign:rollback": cmd_campaign_rollback,
     "campaign:start": cmd_campaign_start,
     "campaign:pause": cmd_campaign_pause,
     "campaign:list": cmd_campaign_list,
@@ -375,6 +410,14 @@ def build_parser() -> argparse.ArgumentParser:
                     ("campaign:pause", "hold a running campaign")]:
         c = sub.add_parser(nm, help=hlp)
         c.add_argument("--campaign", required=True)
+
+    rb = sub.add_parser("campaign:rollback",
+                        help="roll a campaign back to a known-good version")
+    rb.add_argument("--campaign", required=True, help="the campaign to undo")
+    rb.add_argument("--to-firmware", required=True,
+                    help="firmware_id of the known-good build")
+    rb.add_argument("--name")
+    rb.add_argument("--batch-size", type=int)
 
     sub.add_parser("campaign:list", help="list campaigns")
     show = sub.add_parser("campaign:show", help="campaign detail")

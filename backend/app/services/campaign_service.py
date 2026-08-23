@@ -100,7 +100,8 @@ class DryRunEntry:
 
 async def dry_run(session: AsyncSession, *, firmware_id: str,
                   selector: Selector, min_battery: int,
-                  min_network_quality: int) -> list[DryRunEntry]:
+                  min_network_quality: int,
+                  is_rollback: bool = False) -> list[DryRunEntry]:
     """What WOULD happen, without committing anything.
 
     This exists because an operator should never have to start a rollout to
@@ -119,6 +120,7 @@ async def dry_run(session: AsyncSession, *, firmware_id: str,
         min_network_quality=min_network_quality,
         target_version_code=firmware.version_code,
         offline_ttl_seconds=settings.device_offline_ttl_seconds,
+        is_rollback=is_rollback,
     )
 
     out: list[DryRunEntry] = []
@@ -161,6 +163,7 @@ async def create_campaign(
     shrink_threshold: float | None = None,
     abort_threshold: float | None = None,
     max_attempts: int | None = None,
+    is_rollback: bool = False,
     created_by: str = "cli",
 ) -> tuple[Campaign, int]:
     """Create a campaign and materialise its targets. Returns (campaign, count)."""
@@ -188,6 +191,7 @@ async def create_campaign(
         firmware_id=firmware_id,
         selector=selector.to_dict(),
         state=str(CampaignState.DRAFT),
+        is_rollback=is_rollback,
         batch_size_initial=batch_size or settings.default_batch_size,
         batch_size_min=batch_size_min or settings.default_batch_size_min,
         batch_size_max=batch_size_max or settings.default_batch_size_max,
@@ -247,7 +251,8 @@ async def create_campaign(
     log.info("campaign_created", campaign_id=campaign_id, name=name,
              firmware=firmware.version, targets=len(devices),
              batch_size=campaign.batch_size_initial,
-             abort_threshold=campaign.abort_threshold)
+             abort_threshold=campaign.abort_threshold,
+             rollback=is_rollback)
     return campaign, len(devices)
 
 

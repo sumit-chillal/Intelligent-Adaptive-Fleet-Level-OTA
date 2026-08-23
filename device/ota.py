@@ -54,6 +54,8 @@ class ReasonCode:
     FAILED_SIGNATURE_INVALID = "FAILED_SIGNATURE_INVALID"
     FAILED_ANTI_ROLLBACK = "FAILED_ANTI_ROLLBACK"
     FAILED_FLASH_WRITE = "FAILED_FLASH_WRITE"
+    ROLLED_BACK_MANUAL = "ROLLED_BACK_MANUAL"
+    ROLLED_BACK_AUTOMATIC = "ROLLED_BACK_AUTOMATIC"
 
 
 class ManifestRejected(Exception):
@@ -203,6 +205,17 @@ class FailureInjector:
         if self.mode == "flash_error" and self.active:
             return ReasonCode.FAILED_FLASH_WRITE
         return None
+
+    def breaks_boot(self) -> bool:
+        """Whether the newly installed image will fail to self-confirm.
+
+        This models the failure that A/B partitioning exists for: an image that
+        writes and verifies perfectly, then does not come back after the
+        reboot. Hash checks cannot catch it -- the bytes are exactly what the
+        server sent, they just do not work on this device. The only defence is
+        keeping the previous slot intact until the new one proves itself.
+        """
+        return self.mode == "bad_boot" and self.active
 
 
 def decode_chunk(payload: dict) -> tuple[int, bytes, str]:

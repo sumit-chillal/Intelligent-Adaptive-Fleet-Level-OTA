@@ -155,6 +155,68 @@ class Orchestrator:
                    Batch.closed_at.is_(None))
             .order_by(Batch.index.desc()))
 
+    # ---------------------------------------------------------- rollback --
+    async def rollback_campaign(self, campaign_id: str, to_firmware_id: str,
+                                *, name: str | None = None,
+                                batch_size: int | None = None) -> str:
+        """Create a rollback campaign returning a bad release to a known build.
+
+        Targets exactly the devices the original campaign UPDATED -- not every
+        device it touched. A device that failed the bad update never received
+        it, so rolling it "back" would push firmware onto a machine the
+        incident never reached, turning a recovery into a second rollout.
+
+        Returns the new campaign_id. It is created in DRAFT: recovery from a
+        bad release is not something to start automatically, because the
+        operator may want to pause the fleet first.
+        """
+        from app.services.campaign_service import Selector, create_campaign
+
+        async with session_scope() as session:
+            original = await session.scalar(
+                select(Campaign).where(Campaign.campaign_id == campaign_id))
+            if original is None:
+                raise ValueError(f"unknown campaign {campaign_id}")
+
+            updated = list(await session.scalars(
+                select(CampaignTarget.device_id).where(
+                    CampaignTarget.campaign_id == campaign_id,
+                    CampaignTarget.state == str(TargetState.SUCCEEDED))))
+            if not updated:
+                raise ValueError(
+                    f"campaign {campaign_id} updated no devices; there is "
+                    f"nothing to roll back")
+
+            target_fw = await session.scalar(
+                select(Firmware).where(Firmware.firmware_id == to_firmware_id))
+            if target_fw is None:
+                raise ValueError(f"unknown firmware {to_firmware_id}")
+
+            rollback, count = await create_campaign(
+                session,
+                name=name or f"rollback of {original.name}",
+                firmware_id=to_firmware_id,
+                selector=Selector(device_ids=updated),
+                batch_size=batch_size or original.batch_size_initial,
+                # No canary on a recovery. The canary exists to learn whether
+                # an unproven build is safe; the rollback target is the build
+                # these devices were already running successfully, so there is
+                # nothing left to learn and every minute of delay is a minute
+                # the fleet spends on the bad release.
+                canary_size=batch_size or original.batch_size_initial,
+                min_battery=original.min_battery,
+                min_network_quality=original.min_network_quality,
+                abort_threshold=original.abort_threshold,
+                max_attempts=original.max_attempts,
+                is_rollback=True,
+                created_by="rollback",
+            )
+            log.warning("rollback_campaign_created",
+                        campaign_id=rollback.campaign_id,
+                        rolling_back=campaign_id,
+                        to_version=target_fw.version, devices=count)
+            return rollback.campaign_id
+
     # ------------------------------------------------------------- start --
     async def start_campaign(self, campaign_id: str) -> None:
         async with session_scope() as session:
@@ -225,6 +287,7 @@ class Orchestrator:
             min_network_quality=campaign.min_network_quality,
             target_version_code=firmware.version_code,
             offline_ttl_seconds=settings.device_offline_ttl_seconds,
+            is_rollback=campaign.is_rollback,
         )
 
         for target in selected:
@@ -264,7 +327,12 @@ class Orchestrator:
             manifest = build_manifest(
                 pkg, device_id=device.device_id, campaign_id=campaign.campaign_id,
                 min_battery=campaign.min_battery,
-                min_network_quality=campaign.min_network_quality)
+                min_network_quality=campaign.min_network_quality,
+                # Inside the signed structure, so only the real server can
+                # authorise a downgrade. A device that accepted an unsigned
+                # rollback flag could be forced back to a version with a known
+                # vulnerability by anyone who can write to the broker.
+                rollback=campaign.is_rollback)
             signed = sign_manifest(manifest, key)
 
             # Publishing can fail: the broker connection may have dropped
@@ -433,9 +501,22 @@ class Orchestrator:
 
         code = ReasonCode(reason) if reason in ReasonCode.__members__.values() \
             else ReasonCode.FAILED_TIMEOUT
-        success = code == ReasonCode.SUCCESS
 
-        target.state = str(TargetState.SUCCEEDED if success else TargetState.FAILED)
+        # ROLLED_BACK_MANUAL is the SUCCESS of a rollback campaign: the device
+        # did exactly what was asked. ROLLED_BACK_AUTOMATIC is a failure --
+        # the new image would not boot and the device saved itself -- and
+        # counts_as_failure() treats it as one, so the adaptive engine reacts
+        # to a bad build reverting across the fleet exactly as it would to any
+        # other failure. That is the behaviour you want: a firmware that keeps
+        # triggering automatic rollbacks should shrink the batch and then stop
+        # the campaign.
+        rolled_back = str(code).startswith("ROLLED_BACK")
+        success = code in (ReasonCode.SUCCESS, ReasonCode.ROLLED_BACK_MANUAL)
+
+        target.state = str(
+            TargetState.ROLLED_BACK if rolled_back
+            else TargetState.SUCCEEDED if success
+            else TargetState.FAILED)
         target.last_reason_code = str(code)
         target.ended_at = _now()
         self._cancel_stream(target.campaign_id, target.device_id)

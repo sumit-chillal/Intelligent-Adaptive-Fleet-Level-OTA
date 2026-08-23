@@ -342,6 +342,25 @@ async def abort_campaign(campaign_id: str,
 
 
 # ------------------------------------------------------------------ events --
+@app.post("/api/campaigns/{campaign_id}/rollback",
+          dependencies=[Depends(require_admin)])
+async def rollback_campaign(campaign_id: str, to_firmware_id: str,
+                            batch_size: int | None = None) -> dict:
+    """Create a rollback campaign. Does NOT start it.
+
+    Recovery from a bad release is not something to kick off automatically —
+    the operator may want to pause other rollouts first, or check how far the
+    bad build actually spread. Creating in DRAFT keeps the decision theirs.
+    """
+    orchestrator: Orchestrator = state["orchestrator"]
+    try:
+        new_id = await orchestrator.rollback_campaign(
+            campaign_id, to_firmware_id, batch_size=batch_size)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"campaign_id": new_id, "state": "DRAFT", "rolling_back": campaign_id}
+
+
 @app.get("/api/events")
 async def recent_events(limit: int = Query(100, le=500),
                         session: AsyncSession = Depends(get_session)) -> list[dict]:
@@ -406,6 +425,7 @@ def _event_dict(e: DeviceEvent) -> dict:
 def _campaign_dict(c: Campaign) -> dict:
     return {
         "campaign_id": c.campaign_id, "name": c.name, "state": c.state,
+        "is_rollback": c.is_rollback,
         "firmware_id": c.firmware_id,
         "batch_size_initial": c.batch_size_initial,
         "current_batch_size": c.current_batch_size,
