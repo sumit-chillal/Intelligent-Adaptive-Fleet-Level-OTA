@@ -42,7 +42,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from app.constants import DecisionAction, DecisionReason, ReasonCode, counts_as_failure
+from app.constants import (
+    DecisionAction,
+    DecisionReason,
+    ReasonCode,
+    counts_as_failure,
+    counts_as_success,
+)
 
 
 @dataclass(frozen=True)
@@ -86,7 +92,9 @@ class BatchOutcome:
 
     @property
     def successes(self) -> int:
-        return sum(1 for c in self.outcomes if c == ReasonCode.SUCCESS)
+        # counts_as_success, not `== SUCCESS`: a rollback that did what it was
+        # told is a successful attempt, and the engine must be able to see it.
+        return sum(1 for c in self.outcomes if counts_as_success(c))
 
     @property
     def skipped(self) -> int:

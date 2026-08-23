@@ -90,6 +90,25 @@ def version_to_code(version: str) -> int:
     return major * 10000 + minor * 100 + patch
 
 
+def safe_version_code(version: str | None) -> int:
+    """version_to_code that never raises. Returns 0 on anything unparseable.
+
+    Version strings arriving from devices are untrusted input: a board may be
+    running a hand-flashed build called "dev", or nothing at all. Letting a
+    malformed string raise inside message ingestion would drop the whole
+    message -- including the health data in it -- for a field that is only
+    used for comparison.
+
+    0 sorts below every real version, which is the safe default: an unknown
+    version is treated as "older than anything", so the device is a candidate
+    for an update rather than being silently excluded from one.
+    """
+    try:
+        return version_to_code(version or "")
+    except ValueError:
+        return 0
+
+
 def package_firmware(
     data: bytes,
     *,

@@ -37,6 +37,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import EventType
+from app.core.firmware import safe_version_code
 from app.db.models import Device, DeviceEvent, DeviceHealthSample
 from app.schemas.mqtt import HealthMessage, HelloMessage, StatusMessage
 from app.services.eventbus import Channel, bus
@@ -110,6 +111,11 @@ class Ingestor:
             "hw_rev": msg.hw_rev,
             "fleet_tag": msg.fleet_tag,
             "current_version": msg.current_version,
+            # Derived here, once, at the only point a version enters the
+            # system. Storing the string without the comparable form meant
+            # every device read as version_code 0, and a rollback concluded
+            # the entire fleet was below its target and skipped all of it.
+            "current_version_code": safe_version_code(msg.current_version),
             "active_slot": msg.active_slot,
             "battery": msg.battery,
             "network_quality": msg.network_quality,
@@ -181,7 +187,8 @@ class Ingestor:
                 network_quality=msg.network_quality,
                 online=True,
                 last_seen_at=_utcnow(),
-                **({"current_version": msg.current_version}
+                **({"current_version": msg.current_version,
+                    "current_version_code": safe_version_code(msg.current_version)}
                    if msg.current_version else {}),
             )
         )
@@ -196,6 +203,7 @@ class Ingestor:
                         device_type=msg.device_type or "tcu-sim",
                         model=msg.model or "tcu-sim-v1",
                         current_version=msg.current_version,
+                        current_version_code=safe_version_code(msg.current_version),
                         last_seen_at=_utcnow())
                 .on_conflict_do_nothing(index_elements=[Device.device_id])
             )

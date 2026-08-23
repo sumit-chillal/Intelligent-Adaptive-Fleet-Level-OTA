@@ -62,7 +62,20 @@ def counts_as_failure(code: ReasonCode) -> bool:
 
 
 def counts_as_success(code: ReasonCode) -> bool:
-    return code == ReasonCode.SUCCESS
+    """Did the operation achieve what was asked of it?
+
+    ROLLED_BACK_MANUAL is included on purpose. A device that rolled back when
+    told to did exactly its job, and the adaptive engine measures ATTEMPTS --
+    devices the system tried to change. Excluding it meant a rollback campaign
+    reported "no devices attempted" for a batch in which thirteen devices had
+    just been updated, so the engine had no feedback at all during the one
+    rollout that most needs supervision: a recovery from a bad release.
+
+    ROLLED_BACK_AUTOMATIC is NOT included. That is a device saving itself from
+    firmware that would not boot, which is a failure of the update however
+    gracefully it was handled.
+    """
+    return code in (ReasonCode.SUCCESS, ReasonCode.ROLLED_BACK_MANUAL)
 
 
 def is_terminal(code: ReasonCode) -> bool:

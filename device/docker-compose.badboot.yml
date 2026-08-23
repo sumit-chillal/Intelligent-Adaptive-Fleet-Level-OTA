@@ -1,0 +1,38 @@
+# ============================================================================
+# OVERRIDE — automatic rollback test.
+#
+# Turns tcu_D_003 into a device whose new firmware installs and verifies
+# perfectly, then fails to come back after the reboot. That is the failure A/B
+# partitioning exists for: the bytes are exactly what the server sent, they
+# just do not run on this device, so no hash or signature can catch it. Only
+# keeping the previous slot and requiring the new one to prove itself can.
+#
+# WHY THIS IS A SEPARATE FILE
+# ---------------------------
+# It must NOT be folded into docker-compose.laptopD.yml. The demo depends on
+# batch 2 producing exactly two failures out of five — 40%, which shrinks the
+# batch. A third failing device makes it 60%, above the 50% abort threshold,
+# and the campaign halts instead of adapting. The whole demonstration is lost,
+# and you would discover it on stage.
+#
+# Keeping the test config in an override means the demo config is never edited,
+# so it cannot be left in the wrong state by someone forgetting to revert.
+#
+# USAGE — run the test:
+#   docker compose -f docker-compose.laptopD.yml -f docker-compose.badboot.yml up -d tcu_D_003
+#
+# RETURN TO NORMAL afterwards (just drop the override):
+#   docker compose -f docker-compose.laptopD.yml up -d tcu_D_003
+#
+# Verify which mode it is in — the announce line prints the profile:
+#   docker logs tcu_D_003 --tail 3
+#   ...announced v2.3.0 battery=82% net=5 profile=bad_boot   <- test mode
+#   ...announced v2.3.0 battery=82% net=5 profile=none       <- demo mode
+# ============================================================================
+name: convoy-fleet-d
+
+services:
+  tcu_D_003:
+    environment:
+      FAILURE_MODE: bad_boot
+      FAILURE_PROBABILITY: 1.0

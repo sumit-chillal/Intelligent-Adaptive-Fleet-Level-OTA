@@ -92,9 +92,42 @@ def test_automatic_rollback_IS_a_failure():
     assert counts_as_failure(ReasonCode.ROLLED_BACK_AUTOMATIC)
 
 
-def test_neither_rollback_is_counted_as_a_plain_success():
-    for code in (ReasonCode.ROLLED_BACK_MANUAL, ReasonCode.ROLLED_BACK_AUTOMATIC):
-        assert not counts_as_success(code)
+def test_manual_rollback_counts_as_a_successful_attempt():
+    """Corrects an earlier assumption in this file.
+
+    The first version asserted that neither rollback counted as a success. That
+    was wrong, and the live logs showed why: with ROLLED_BACK_MANUAL excluded,
+    a rollback batch reported "no devices attempted; all targets were
+    ineligible" for a batch in which thirteen devices had just been updated.
+
+    The engine measures attempts. A rollback IS an attempt, and one that
+    achieved its goal — so during a recovery the engine can still see a rising
+    failure rate and shrink the batch, which is exactly when you want it
+    watching.
+    """
+    assert counts_as_success(ReasonCode.ROLLED_BACK_MANUAL)
+    assert not counts_as_success(ReasonCode.ROLLED_BACK_AUTOMATIC)
+
+
+def test_rollback_batch_is_visible_to_the_adaptive_engine():
+    from app.core.adaptive import BatchOutcome
+
+    batch = BatchOutcome(index=1, outcomes=(ReasonCode.ROLLED_BACK_MANUAL,) * 5)
+    assert batch.attempted == 5, "a rollback batch must not read as zero attempts"
+    assert batch.failure_rate == 0.0
+
+
+def test_a_rollback_that_starts_failing_is_still_caught():
+    """The property the fix protects: if devices begin failing to roll back,
+    the engine sees the rate and reacts."""
+    from app.core.adaptive import BatchOutcome
+
+    batch = BatchOutcome(index=2, outcomes=(
+        ReasonCode.ROLLED_BACK_MANUAL, ReasonCode.ROLLED_BACK_MANUAL,
+        ReasonCode.ROLLED_BACK_MANUAL, ReasonCode.FAILED_POOR_NETWORK,
+        ReasonCode.FAILED_TIMEOUT))
+    assert batch.attempted == 5
+    assert batch.failure_rate == pytest.approx(0.4)
 
 
 # ------------------------------------------------------- signed authority ----

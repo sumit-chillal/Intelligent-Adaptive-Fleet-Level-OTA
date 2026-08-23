@@ -60,7 +60,7 @@ from app.constants import (
 from app.core.adaptive import BatchOutcome, Decision, RolloutPolicy, RolloutState, decide
 from app.core.crypto import sign_manifest
 from app.core.eligibility import DeviceSnapshot, EligibilityPolicy, evaluate
-from app.core.firmware import FirmwarePackage, build_manifest
+from app.core.firmware import FirmwarePackage, build_manifest, safe_version_code
 from app.db.models import Batch, Campaign, CampaignTarget, Device, Firmware, RolloutDecision
 from app.db.session import session_scope
 from app.mqtt import topics
@@ -463,8 +463,10 @@ class Orchestrator:
                 new_version=payload.get("version"),
                 chunk_index=payload.get("chunk_index"))
 
-        emoji = "ok" if reason == str(ReasonCode.SUCCESS) else "FAILED"
-        log.info("update_result", device_id=device_id, outcome=emoji, reason=reason)
+        outcome = ("ok" if reason == str(ReasonCode.SUCCESS)
+                   else "rolled back" if reason == str(ReasonCode.ROLLED_BACK_MANUAL)
+                   else "FAILED")
+        log.info("update_result", device_id=device_id, outcome=outcome, reason=reason)
 
     def _cancel_stream(self, campaign_id: str, device_id: str) -> None:
         """Stop pushing chunks at a device that has already finished.
@@ -531,7 +533,8 @@ class Orchestrator:
         if success and new_version:
             await session.execute(
                 update(Device).where(Device.device_id == target.device_id)
-                .values(current_version=new_version))
+                .values(current_version=new_version,
+                        current_version_code=safe_version_code(new_version)))
 
         await ingestor.record_event(
             device_id=target.device_id, campaign_id=target.campaign_id,
