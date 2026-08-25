@@ -38,3 +38,5 @@ out/
 # os
 .DS_Store
 Thumbs.db
+
+backend/build/
