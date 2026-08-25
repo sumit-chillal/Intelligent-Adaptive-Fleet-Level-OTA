@@ -71,6 +71,7 @@ export function FleetGrid({ devices, progress, targetVersion, targetStates = {},
           const accent =
             state === "FAILED" ? "var(--fault)"
             : state === "SKIPPED" ? "var(--dormant)"
+            : state === "ROLLED_BACK" ? "var(--govern)"
             : updated ? "var(--verified)"
             : live ? "var(--transit)"
             : device.online ? "var(--rule)"
@@ -78,6 +79,9 @@ export function FleetGrid({ devices, progress, targetVersion, targetStates = {},
 
           const mark =
             state === "FAILED" ? "✕"
+            // Amber and a down-arrow: a reverted device is neither a success
+            // nor a failure, and the strip should not imply either.
+            : state === "ROLLED_BACK" ? "↓"
             : state === "SKIPPED" ? "–"
             : updated ? "▪"
             : live ? "▸"

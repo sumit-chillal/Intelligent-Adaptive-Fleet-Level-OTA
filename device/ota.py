@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import json
 import random
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -104,57 +106,131 @@ def verify_offer(wire: dict, public_key: Ed25519PublicKey, *, device_id: str,
 
 @dataclass
 class Download:
-    """One in-flight update. Everything needed to resume it lives here."""
+    """One in-flight update, backed by a FILE rather than by memory.
+
+    WHY A FILE
+    ----------
+    The first version accumulated chunks in a dict. Resume then worked on
+    paper and failed in practice: the device could ask the server to continue
+    from chunk 9, but a restarted process had lost chunks 0-8 AND the manifest,
+    so every arriving chunk hit `active is None` and was dropped. It resumed
+    forever without progressing.
+
+    A real ECU writes each verified chunk straight into the inactive flash
+    slot; that partially-written slot is what survives a power cut and makes
+    resume mean something. Writing to a file on the mounted volume models the
+    same thing, and it makes the resume point self-evident: the number of bytes
+    already on disk IS the progress. No separate counter to drift.
+    """
 
     campaign_id: str
     firmware_id: str
     version: str
     version_code: int
     chunk_count: int
+    chunk_size: int
     sha256: str
     chunk_hashes: list[str]
     nonce: str
-    chunks: dict[int, bytes] = field(default_factory=dict)
+    path: Path
+    manifest: dict
+    is_rollback: bool = False
     started_at: float = field(default_factory=time.time)
 
     @property
     def next_index(self) -> int:
-        """Lowest chunk not yet held. Contiguity is what makes resume simple:
-        the device only has to remember one integer."""
-        for i in range(self.chunk_count):
-            if i not in self.chunks:
-                return i
-        return self.chunk_count
+        """Derived from the file, never tracked separately.
+
+        A counter kept alongside the data can disagree with it after a crash
+        between the write and the counter update. The file length cannot.
+        """
+        if not self.path.exists():
+            return 0
+        return self.path.stat().st_size // self.chunk_size
 
     @property
     def complete(self) -> bool:
-        return len(self.chunks) == self.chunk_count
+        return self.next_index >= self.chunk_count
 
     @property
     def percent(self) -> float:
-        return 100.0 * len(self.chunks) / self.chunk_count if self.chunk_count else 0.0
+        return 100.0 * self.next_index / self.chunk_count if self.chunk_count else 0.0
 
-    def accept_chunk(self, index: int, data: bytes, sha256: str) -> None:
-        expected = self.chunk_hashes[index]
+    def accept_chunk(self, index: int, data: bytes) -> bool:
+        """Verify and append. Returns False for a chunk we already have.
+
+        Chunks are appended strictly in order. The server streams sequentially,
+        so an out-of-order arrival means a duplicate from a QoS 1 redelivery or
+        an overlapping stream after a resume -- both are safe to drop, and
+        dropping them is what keeps the file a faithful prefix of the image.
+        """
+        expected_index = self.next_index
+        if index < expected_index:
+            return False           # already written
+        if index > expected_index:
+            return False           # gap: wait for the one we need
+
+        expected_hash = self.chunk_hashes[index]
         actual = hashlib.sha256(data).hexdigest()
-        if actual != expected:
+        if actual != expected_hash:
             raise ManifestRejected(
                 ReasonCode.FAILED_CHUNK_HASH_MISMATCH,
-                f"chunk {index}: expected {expected[:12]}, got {actual[:12]}")
-        self.chunks[index] = data
+                f"chunk {index}: expected {expected_hash[:12]}, got {actual[:12]}")
+
+        with self.path.open("ab") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())   # survive a power cut, like a flash write
+        return True
 
     def assemble(self) -> bytes:
-        missing = [i for i in range(self.chunk_count) if i not in self.chunks]
-        if missing:
-            raise ManifestRejected(ReasonCode.FAILED_IMAGE_HASH_MISMATCH,
-                                   f"missing chunks {missing[:5]}")
-        image = b"".join(self.chunks[i] for i in range(self.chunk_count))
+        """Read the completed slot back and verify the whole image."""
+        if not self.complete:
+            raise ManifestRejected(
+                ReasonCode.FAILED_IMAGE_HASH_MISMATCH,
+                f"incomplete: {self.next_index}/{self.chunk_count} chunks")
+        image = self.path.read_bytes()
         actual = hashlib.sha256(image).hexdigest()
         if actual != self.sha256:
             raise ManifestRejected(
                 ReasonCode.FAILED_IMAGE_HASH_MISMATCH,
                 f"image hash {actual[:12]} != manifest {self.sha256[:12]}")
         return image
+
+    def discard(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+    def to_state(self) -> dict:
+        """What must survive a restart: where we are, and what we agreed to.
+
+        The MANIFEST is stored, not just the chunk index. Without it a
+        restarted device knows how far it got but not what it was downloading,
+        so it cannot verify or accept another chunk.
+        """
+        return {"campaign_id": self.campaign_id,
+                "firmware_id": self.firmware_id,
+                "path": str(self.path),
+                "manifest": self.manifest,
+                "is_rollback": self.is_rollback}
+
+    @classmethod
+    def from_manifest(cls, manifest: dict, state_dir: Path,
+                      is_rollback: bool = False) -> "Download":
+        path = state_dir / f"{manifest['campaign_id']}_{manifest['firmware_id']}.part"
+        return cls(
+            campaign_id=manifest["campaign_id"],
+            firmware_id=manifest["firmware_id"],
+            version=manifest["version"],
+            version_code=manifest["version_code"],
+            chunk_count=manifest["chunk_count"],
+            chunk_size=manifest["chunk_size"],
+            sha256=manifest["sha256"],
+            chunk_hashes=manifest["chunk_hashes"],
+            nonce=manifest["nonce"],
+            path=path,
+            manifest=manifest,
+            is_rollback=is_rollback,
+        )
 
 
 class FailureInjector:

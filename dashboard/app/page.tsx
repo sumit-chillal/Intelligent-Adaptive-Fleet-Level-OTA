@@ -51,9 +51,15 @@ export default function LiveCampaignPage() {
 
   const counts = useMemo(() => {
     const t = campaign?.targets ?? [];
+    // ROLLED_BACK counts as done. A rollback campaign in which every device
+    // reverted on request is a campaign that fully succeeded -- reading
+    // "UPDATED 0/13" after thirteen devices did exactly what was asked makes
+    // the screen say the opposite of what happened.
     return {
       total: t.length,
-      succeeded: t.filter((x) => x.state === "SUCCEEDED").length,
+      succeeded: t.filter(
+        (x) => x.state === "SUCCEEDED" || x.state === "ROLLED_BACK",
+      ).length,
       failed: t.filter((x) => x.state === "FAILED").length,
       skipped: t.filter((x) => x.state === "SKIPPED").length,
     };
@@ -76,6 +82,7 @@ export default function LiveCampaignPage() {
   };
 
   const targetVersion = campaign?.targets?.[0]?.to_version ?? null;
+  const isRollback = Boolean((campaign as { is_rollback?: boolean } | null)?.is_rollback);
 
   return (
     <main className="mx-auto max-w-[1600px] px-6 py-5">
@@ -180,7 +187,10 @@ export default function LiveCampaignPage() {
           </div>
         </div>
 
-        <Figure label="Updated" value={`${counts.succeeded}/${counts.total}`} />
+        <Figure
+          label={isRollback ? "Rolled back" : "Updated"}
+          value={`${counts.succeeded}/${counts.total}`}
+        />
         <Figure
           label="Failed"
           value={String(counts.failed)}

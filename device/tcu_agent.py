@@ -209,7 +209,7 @@ def publish_hello(client: mqtt.Client, trigger: str) -> None:
         agent="tcu-agent/0.1",
         trigger=trigger,
     ), qos=1)
-    log.info("announced v%s battery=%d%% net=%d profile=%s (trigger=%s)",
+    log.info("announced v%s battery=%d% net=%d profile=%s (trigger=%s)",
              state["current_version"], round(battery), NETWORK_QUALITY,
              FAILURE_MODE, trigger)
 
@@ -229,14 +229,24 @@ def on_connect(client, _userdata, _flags, rc, properties=None):
     # than starting over. This is Requirement 11, and the resume state survived
     # in the state file on the mounted volume.
     resume = state.get("resume")
-    if resume:
-        log.info("resuming interrupted download from chunk %d",
-                 resume["next_chunk"])
+    if resume and resume.get("manifest"):
+        # Rebuild the in-flight download from what was persisted. Asking to
+        # resume without doing this was the original bug: the device requested
+        # continuation from chunk N, the server obliged, and every chunk was
+        # then dropped because `active` was None after the restart.
+        global active, injector, is_rollback
+        active = Download.from_manifest(
+            resume["manifest"], STATE_DIR, resume.get("is_rollback", False))
+        is_rollback = active.is_rollback
+        injector = FailureInjector(FAILURE_MODE, FAILURE_PROBABILITY,
+                                   active.chunk_count)
+        log.info("resuming interrupted download of v%s from chunk %d/%d",
+                 active.version, active.next_index, active.chunk_count)
         client.publish(T_OTA_RESUME, envelope(
             schema="convoy.resume.v1",
-            campaign_id=resume["campaign_id"],
-            firmware_id=resume.get("firmware_id"),
-            last_chunk_index=resume["next_chunk"] - 1,
+            campaign_id=active.campaign_id,
+            firmware_id=active.firmware_id,
+            last_chunk_index=active.next_index - 1,
         ), qos=1)
 
     client.publish(T_STATUS, envelope(schema="convoy.status.v1", online=True),
@@ -305,6 +315,8 @@ def server_public_key() -> Ed25519PublicKey:
 def fail_update(client: mqtt.Client, campaign_id: str, reason: str,
                 detail: str = "", chunk_index: int | None = None) -> None:
     global active
+    if active is not None:
+        active.discard()
     log.error("UPDATE FAILED %s %s", reason, detail)
     client.publish(T_OTA_RESULT, envelope(
         schema="convoy.result.v1", campaign_id=campaign_id, success=False,
@@ -361,14 +373,16 @@ def handle_offer(client: mqtt.Client, wire: dict) -> None:
                     f"battery {round(battery)}% < {manifest['min_battery']}%")
         return
 
-    active = Download(
-        campaign_id=campaign_id, firmware_id=manifest["firmware_id"],
-        version=manifest["version"], version_code=manifest["version_code"],
-        chunk_count=manifest["chunk_count"], sha256=manifest["sha256"],
-        chunk_hashes=manifest["chunk_hashes"], nonce=manifest["nonce"],
-    )
     global is_rollback
     is_rollback = bool(manifest.get("rollback", False))
+
+    active = Download.from_manifest(manifest, STATE_DIR, is_rollback)
+    # A fresh offer starts a fresh slot. Any partial file from an abandoned
+    # campaign is discarded rather than appended to -- resuming into the wrong
+    # image would produce bytes that pass no hash and waste a whole transfer.
+    active.discard()
+    state["resume"] = active.to_state()
+    save_state(state)
     if is_rollback:
         log.warning("this offer is a ROLLBACK to v%s (from v%s)",
                     manifest["version"], state["current_version"])
@@ -459,6 +473,7 @@ def install(client: mqtt.Client) -> None:
     state["resume"] = None
     save_state(state)
 
+    active.discard()      # the slot is written; the staging file is spent
     log.info("INSTALLED v%s (%d bytes) slot %s -> %s",
              active.version, len(image), previous_slot, new_slot)
 

@@ -111,7 +111,11 @@ export default function AnalyticsPage() {
             <Figure label="Devices" value={String(targets.length)} />
             <Figure
               label="Updated"
-              value={String(targets.filter((t) => t.state === "SUCCEEDED").length)}
+              value={String(
+                targets.filter(
+                  (t) => t.state === "SUCCEEDED" || t.state === "ROLLED_BACK",
+                ).length,
+              )}
               color="var(--verified)"
             />
             <Figure
@@ -209,7 +213,9 @@ export default function AnalyticsPage() {
                         ? "var(--fault)"
                         : reason.startsWith("SKIPPED")
                           ? "var(--dormant)"
-                          : "var(--verified)";
+                          : reason.startsWith("ROLLED_BACK")
+                            ? "var(--govern)"
+                            : "var(--verified)";
                       return (
                         <div key={reason} className="flex items-center gap-3">
                           <span className="w-[15rem] shrink-0 font-mono text-[11px]">

@@ -28,6 +28,7 @@ const OUTCOME_COLOR: Record<string, string> = {
   SUCCEEDED: "var(--verified)",
   FAILED: "var(--fault)",
   SKIPPED: "var(--dormant)",
+  ROLLED_BACK: "var(--govern)",
   DOWNLOADING: "var(--transit)",
   INSTALLING: "var(--transit)",
   OFFERED: "var(--transit)",
@@ -66,7 +67,9 @@ export function ConvoyStrip({ batches, decisions, targets }: Props) {
             decision && decision.new_batch_size > decision.prev_batch_size;
 
           const members = targets.filter((t) => t.batch_id === batch.id);
-          const ok = members.filter((t) => t.state === "SUCCEEDED").length;
+          const ok = members.filter(
+            (t) => t.state === "SUCCEEDED" || t.state === "ROLLED_BACK",
+          ).length;
           const failed = members.filter((t) => t.state === "FAILED").length;
           const skipped = members.filter((t) => t.state === "SKIPPED").length;
 
