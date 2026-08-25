@@ -28,11 +28,18 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.crypto import sign_manifest
 from app.core.firmware import build_manifest
-from app.db.models import Campaign, CampaignTarget, Device, Firmware
+from app.db.models import (
+    Campaign,
+    CampaignTarget,
+    Device,
+    DeviceEvent,
+    DeviceHealthSample,
+    Firmware,
+)
 from app.db.session import check_connection, dispose_engine, session_scope
 from app.services import campaign_service as cs
 from app.services import firmware_service as fs
@@ -56,6 +63,47 @@ async def cmd_devices(_args) -> int:
               f"{str(d.battery if d.battery is not None else '-'):>5}%"
               f"{str(d.network_quality or '-'):>5}  {state}")
     print(f"  {sum(1 for d in rows if d.online)}/{len(rows)} online\n")
+    return 0
+
+
+async def cmd_device_remove(args) -> int:
+    """Delete a device and its history. For test artefacts only.
+
+    Refuses if the device took part in any campaign: campaign_targets and
+    device_events reference it, and deleting it would leave a rollout whose
+    per-device outcomes no longer add up. History that can be quietly deleted
+    is not an audit trail (Rules.md R5).
+    """
+    async with session_scope() as session:
+        device = await session.scalar(
+            select(Device).where(Device.device_id == args.device))
+        if device is None:
+            print(f"{R}unknown device {args.device!r}{RESET}")
+            return 1
+
+        used = await session.scalar(
+            select(CampaignTarget).where(CampaignTarget.device_id == args.device))
+        if used is not None and not args.force:
+            print(f"{R}refusing:{RESET} {args.device} took part in campaign "
+                  f"{used.campaign_id}. Its history is referenced by that "
+                  f"rollout's results.")
+            print(f"  Pass --force to delete anyway (the campaign's per-device "
+                  f"outcomes will no longer add up).")
+            return 1
+
+        if args.force:
+            await session.execute(
+                delete(CampaignTarget).where(CampaignTarget.device_id == args.device))
+            await session.execute(
+                delete(DeviceEvent).where(DeviceEvent.device_id == args.device))
+            await session.execute(
+                delete(DeviceHealthSample).where(
+                    DeviceHealthSample.device_id == args.device))
+
+        await session.delete(device)
+        print(f"{Y}removed{RESET} {args.device}")
+        print(f"  Also clear its retained broker status, or it reappears:")
+        print(f"      cd ../admin && python link_check.py --forget {args.device}")
     return 0
 
 
@@ -348,6 +396,7 @@ async def cmd_campaign_show(args) -> int:
 # --------------------------------------------------------------------- main --
 COMMANDS = {
     "devices": cmd_devices,
+    "device:remove": cmd_device_remove,
     "firmware:make": cmd_firmware_make,
     "firmware:publish": cmd_firmware_publish,
     "firmware:list": cmd_firmware_list,
@@ -367,6 +416,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("devices", help="list registered devices")
+
+    rm = sub.add_parser("device:remove",
+                        help="delete a test device and its history")
+    rm.add_argument("--device", required=True)
+    rm.add_argument("--force", action="store_true",
+                    help="delete even if it appears in campaign history")
 
     m = sub.add_parser("firmware:make", help="generate a test firmware image")
     m.add_argument("--version", required=True)

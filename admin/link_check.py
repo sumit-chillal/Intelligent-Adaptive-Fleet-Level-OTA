@@ -95,6 +95,14 @@ def on_message(_client, _userdata, msg: mqtt.MQTTMessage):
     device_id = parts[3]
     leaf = "/".join(parts[4:])
 
+    # An EMPTY retained payload is MQTT's deletion marker — it is how --forget
+    # erases a device's retained status. Treating it as a message would parse
+    # to nothing and then default `online` to True, so clearing a ghost device
+    # made it immediately reappear as ONLINE, which is the opposite of the
+    # intended effect.
+    if not msg.payload:
+        return
+
     try:
         payload = json.loads(msg.payload.decode())
     except (UnicodeDecodeError, json.JSONDecodeError):
