@@ -59,10 +59,24 @@ class FirmwarePackage:
     def chunk_count(self) -> int:
         return len(self.chunks)
 
-    def chunk_payload(self, index: int, campaign_id: str) -> dict:
-        """One wire message carrying one chunk."""
+    def chunk_payload(self, index: int, campaign_id: str,
+                      content_key: bytes | None = None) -> dict:
+        """One wire message carrying one chunk.
+
+        With a content key the payload is AES-256-GCM ciphertext; without one
+        it is the raw chunk. The chunk HASH is always of the PLAINTEXT, so the
+        integrity guarantee is about the firmware image itself and does not
+        change meaning when encryption is switched on. GCM separately
+        authenticates the ciphertext in transit.
+        """
         if not 0 <= index < self.chunk_count:
             raise IndexError(f"chunk {index} out of range 0..{self.chunk_count - 1}")
+
+        raw = self.chunks[index]
+        if content_key is not None:
+            from app.core.crypto import encrypt_chunk
+            raw = encrypt_chunk(content_key, index, raw, self.firmware_id)
+
         return {
             "schema": "convoy.chunk.v1",
             "campaign_id": campaign_id,
@@ -70,7 +84,8 @@ class FirmwarePackage:
             "index": index,
             "count": self.chunk_count,
             "sha256": self.chunk_hashes[index],
-            "data": base64.b64encode(self.chunks[index]).decode("ascii"),
+            "encrypted": content_key is not None,
+            "data": base64.b64encode(raw).decode("ascii"),
         }
 
 
@@ -150,6 +165,7 @@ def build_manifest(
     rollback: bool = False,
     download_url: str | None = None,
     nonce: str | None = None,
+    key_wrap: dict | None = None,
 ) -> dict:
     """Build the per-device manifest that will be signed.
 
@@ -175,6 +191,11 @@ def build_manifest(
         "min_network_quality": min_network_quality,
         "rollback": rollback,
         "download_url": download_url,
+        # Key material lives INSIDE the signed structure. An attacker who could
+        # substitute their own ephemeral key and wrapped key would otherwise be
+        # able to make a device decrypt chunks of their choosing; the signature
+        # binds the key to the same authority that vouches for the image.
+        **(key_wrap or {"enc_alg": "none"}),
     }
 
 

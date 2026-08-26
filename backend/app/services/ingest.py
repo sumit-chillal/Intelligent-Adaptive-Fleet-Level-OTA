@@ -120,6 +120,7 @@ class Ingestor:
             "battery": msg.battery,
             "network_quality": msg.network_quality,
             "failure_profile": msg.failure_profile,
+            "x25519_public_key": msg.x25519_public_key,
             "online": True,
             "last_seen_at": _utcnow(),
         }

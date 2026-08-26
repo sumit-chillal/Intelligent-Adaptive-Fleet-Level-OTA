@@ -58,7 +58,7 @@ from app.constants import (
     counts_as_failure,
 )
 from app.core.adaptive import BatchOutcome, Decision, RolloutPolicy, RolloutState, decide
-from app.core.crypto import sign_manifest
+from app.core.crypto import new_content_key, sign_manifest, wrap_content_key
 from app.core.eligibility import DeviceSnapshot, EligibilityPolicy, evaluate
 from app.core.firmware import FirmwarePackage, build_manifest, safe_version_code
 from app.db.models import Batch, Campaign, CampaignTarget, Device, Firmware, RolloutDecision
@@ -89,6 +89,7 @@ class Orchestrator:
         self._stream_tasks: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
         self._warmed = False
+        self._campaign_keys: dict[str, bytes] = {}
 
     # ------------------------------------------------------------ lifecycle
     async def run(self, interval_s: float = 2.0) -> None:
@@ -324,6 +325,40 @@ class Orchestrator:
                          reason=str(result.reason), detail=result.detail)
                 continue
 
+            # One content key per campaign, wrapped separately for each
+            # device. Reusing a key across campaigns would risk a (key, nonce)
+            # collision, since nonces are derived from the chunk index and
+            # every campaign starts again at chunk 0.
+            key_wrap = None
+            content_key = None
+            if settings.firmware_encryption_enabled:
+                if not device.x25519_public_key:
+                    # Cannot encrypt for a device that has not published a key.
+                    # Refusing is the right call: silently falling back to
+                    # plaintext would mean a fleet believed to be encrypted was
+                    # partly not, which is worse than a visible failure.
+                    target.state = str(TargetState.SKIPPED)
+                    target.last_reason_code = str(ReasonCode.SKIPPED_OFFLINE)
+                    target.deferrals += 1
+                    target.ended_at = _now()
+                    batch.skipped_count += 1
+                    await ingestor.record_event(
+                        device_id=device.device_id,
+                        campaign_id=campaign.campaign_id, batch_id=batch.id,
+                        event_type=EventType.ELIGIBILITY_CHECKED,
+                        reason_code=str(ReasonCode.SKIPPED_OFFLINE),
+                        source="server",
+                        payload={"detail": "encryption enabled but the device "
+                                           "has published no X25519 public key"})
+                    log.warning("no_device_key", device_id=device.device_id)
+                    continue
+
+                content_key = self._campaign_key(campaign.campaign_id)
+                key_wrap = wrap_content_key(
+                    content_key, bytes.fromhex(device.x25519_public_key),
+                    device_id=device.device_id,
+                    campaign_id=campaign.campaign_id)
+
             manifest = build_manifest(
                 pkg, device_id=device.device_id, campaign_id=campaign.campaign_id,
                 min_battery=campaign.min_battery,
@@ -332,7 +367,8 @@ class Orchestrator:
                 # authorise a downgrade. A device that accepted an unsigned
                 # rollback flag could be forced back to a version with a known
                 # vulnerability by anyone who can write to the broker.
-                rollback=campaign.is_rollback)
+                rollback=campaign.is_rollback,
+                key_wrap=key_wrap)
             signed = sign_manifest(manifest, key)
 
             # Publishing can fail: the broker connection may have dropped
@@ -569,9 +605,13 @@ class Orchestrator:
             async with session_scope() as session:
                 pkg = await self._package(session, firmware_id)
 
+            content_key = (self._campaign_key(campaign_id)
+                           if settings.firmware_encryption_enabled else None)
+
             topic = topics.server_topic(device_id, topics.ServerLeaf.OTA_CHUNK)
             for index in range(start_index, pkg.chunk_count):
-                await self.bridge.publish(topic, pkg.chunk_payload(index, campaign_id))
+                await self.bridge.publish(
+                    topic, pkg.chunk_payload(index, campaign_id, content_key))
                 await asyncio.sleep(0.05)
             log.info("chunks_sent", device_id=device_id,
                      first=start_index, last=pkg.chunk_count - 1)
@@ -821,6 +861,19 @@ class Orchestrator:
         if firmware_id not in self._packages:
             self._packages[firmware_id] = await load_package(session, firmware_id)
         return self._packages[firmware_id]
+
+    def _campaign_key(self, campaign_id: str) -> bytes:
+        """One content key per campaign, held in memory for its duration.
+
+        Not persisted: the key protects firmware in transit, and a key sitting
+        in the database after the campaign ends is a liability with no
+        remaining purpose. If the server restarts mid-campaign the running
+        transfers fail and retry with a fresh key, which is the correct
+        trade -- a lost transfer costs seconds, a leaked key costs the image.
+        """
+        if campaign_id not in self._campaign_keys:
+            self._campaign_keys[campaign_id] = new_content_key()
+        return self._campaign_keys[campaign_id]
 
     def _signing_key(self):
         if self._key is None:

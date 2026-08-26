@@ -242,3 +242,174 @@ def verify_manifest(
             f"{min_allowed_version_code} and rollback was not authorised")
 
     return manifest
+
+
+# ============================================================ CONFIDENTIALITY
+"""
+Firmware confidentiality — AES-256-GCM with per-device key wrapping.
+
+THE GAP THIS CLOSES
+-------------------
+Signing proves a firmware image is authentic. It does nothing to keep it
+secret. Until now the chunks travelled base64-plaintext inside TLS, which means
+the broker operator -- a third party we explicitly said we do not trust -- could
+read every image we shipped. For a system whose entire argument is "do not
+depend on the transport", that was the one inconsistency worth closing.
+
+WHY THE KEY CANNOT SIMPLY LIVE IN THE MANIFEST
+----------------------------------------------
+The obvious shortcut is to put the AES key in the signed manifest. It does not
+work: the manifest travels over the same broker as the chunks, so anyone who
+can read the ciphertext can also read the key sitting next to it. Signing
+protects the manifest from being CHANGED, not from being READ.
+
+THE DESIGN
+----------
+Each device generates an X25519 keypair on first boot and publishes the public
+half in its `hello`. To encrypt for a device the server:
+
+  1. generates a random 256-bit content key for this campaign;
+  2. generates an ephemeral X25519 keypair;
+  3. derives a key-encryption key: HKDF-SHA256(ECDH(ephemeral, device_public));
+  4. wraps the content key under that KEK with AES-256-GCM;
+  5. puts the ephemeral public key and the wrapped key INSIDE the signed
+     manifest.
+
+Only the holder of the device's private key can complete the ECDH and recover
+the content key. The broker sees an ephemeral public key and a ciphertext, and
+neither helps it.
+
+Putting the wrapped key inside the SIGNED structure matters: an attacker who
+substituted their own ephemeral key and wrapped key could otherwise make a
+device decrypt chunks of the attacker's choosing. The signature binds the key
+material to the same authority that vouches for the image.
+
+WHY EPHEMERAL KEYS
+------------------
+A fresh ephemeral keypair per manifest gives forward secrecy. If a device's
+long-term private key is later extracted from flash, previously captured
+traffic still cannot be decrypted, because the ephemeral private half was
+never stored anywhere.
+
+NONCE DISCIPLINE
+----------------
+GCM fails catastrophically if a (key, nonce) pair is ever reused -- it leaks
+the XOR of the plaintexts and, worse, the authentication key. The chunk nonce
+is therefore derived deterministically from the chunk INDEX, and the content
+key is fresh per campaign, so a given pair can occur exactly once. Random
+nonces would have been the more common choice and the more dangerous one here,
+because a 512-chunk image gives 512 chances to collide.
+"""
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+CONTENT_KEY_BYTES = 32          # AES-256
+GCM_NONCE_BYTES = 12
+ENC_ALG = "aes-256-gcm"
+KEK_INFO = b"convoy-kek-v1"
+
+
+def new_content_key() -> bytes:
+    return secrets.token_bytes(CONTENT_KEY_BYTES)
+
+
+def generate_device_keypair() -> tuple[bytes, bytes]:
+    """Returns (private_raw, public_raw). Devices call this once, on first boot."""
+    private = X25519PrivateKey.generate()
+    return (
+        private.private_bytes_raw(),
+        private.public_key().public_bytes_raw(),
+    )
+
+
+def _derive_kek(shared_secret: bytes, device_id: str, campaign_id: str) -> bytes:
+    """HKDF over the raw ECDH output.
+
+    The raw shared secret is NOT used directly as a key: X25519 output is a
+    curve point with structure, not a uniformly random string, and AES expects
+    the latter. HKDF also binds the device and campaign into the derivation, so
+    a KEK is useless anywhere but the exact context it was made for.
+    """
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=KEK_INFO + b"|" + device_id.encode() + b"|" + campaign_id.encode(),
+    ).derive(shared_secret)
+
+
+def wrap_content_key(content_key: bytes, device_public_raw: bytes, *,
+                     device_id: str, campaign_id: str) -> dict:
+    """Server side. Returns the fields to embed in the signed manifest."""
+    device_public = X25519PublicKey.from_public_bytes(device_public_raw)
+    ephemeral = X25519PrivateKey.generate()
+    kek = _derive_kek(ephemeral.exchange(device_public), device_id, campaign_id)
+
+    nonce = secrets.token_bytes(GCM_NONCE_BYTES)
+    wrapped = AESGCM(kek).encrypt(nonce, content_key, None)
+    return {
+        "enc_alg": ENC_ALG,
+        "enc_ephemeral_public": ephemeral.public_key().public_bytes_raw().hex(),
+        "enc_wrapped_key": wrapped.hex(),
+        "enc_wrap_nonce": nonce.hex(),
+    }
+
+
+def unwrap_content_key(manifest: dict, device_private_raw: bytes, *,
+                       device_id: str) -> bytes:
+    """Device side. Raises ManifestRejected if the key cannot be recovered."""
+    try:
+        ephemeral_public = X25519PublicKey.from_public_bytes(
+            bytes.fromhex(manifest["enc_ephemeral_public"]))
+        private = X25519PrivateKey.from_private_bytes(device_private_raw)
+        kek = _derive_kek(private.exchange(ephemeral_public), device_id,
+                          manifest["campaign_id"])
+        return AESGCM(kek).decrypt(
+            bytes.fromhex(manifest["enc_wrap_nonce"]),
+            bytes.fromhex(manifest["enc_wrapped_key"]),
+            None,
+        )
+    except (KeyError, ValueError, InvalidSignature) as exc:
+        raise ManifestRejected("FAILED_SIGNATURE_INVALID",
+                               f"cannot unwrap content key: {exc}")
+    except Exception as exc:
+        raise ManifestRejected("FAILED_SIGNATURE_INVALID",
+                               f"key unwrap failed: {type(exc).__name__}")
+
+
+def chunk_nonce(index: int) -> bytes:
+    """Deterministic per-chunk nonce.
+
+    Derived from the index rather than drawn at random. With a content key that
+    is fresh per campaign, a (key, nonce) pair can then occur exactly once by
+    construction -- no birthday problem, no state to keep, and no way for a
+    retransmitted chunk to reuse a nonce with different plaintext.
+    """
+    return index.to_bytes(GCM_NONCE_BYTES, "big")
+
+
+def encrypt_chunk(content_key: bytes, index: int, plaintext: bytes,
+                  firmware_id: str) -> bytes:
+    # firmware_id as associated data: the ciphertext is bound to the image it
+    # belongs to, so a chunk cannot be transplanted between two firmware
+    # versions that happen to share a content key.
+    aad = f"{firmware_id}:{index}".encode()
+    return AESGCM(content_key).encrypt(chunk_nonce(index), plaintext, aad)
+
+
+def decrypt_chunk(content_key: bytes, index: int, ciphertext: bytes,
+                  firmware_id: str) -> bytes:
+    aad = f"{firmware_id}:{index}".encode()
+    try:
+        return AESGCM(content_key).decrypt(chunk_nonce(index), ciphertext, aad)
+    except Exception:
+        # GCM authenticates as well as encrypts, so this fires on tampering,
+        # not just on a wrong key.
+        raise ManifestRejected("FAILED_CHUNK_HASH_MISMATCH",
+                               f"chunk {index} failed authenticated decryption")

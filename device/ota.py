@@ -41,7 +41,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
 class ReasonCode:
@@ -134,8 +141,14 @@ class Download:
     nonce: str
     path: Path
     manifest: dict
+    size_bytes: int = 0
     is_rollback: bool = False
+    content_key: bytes | None = None
     started_at: float = field(default_factory=time.time)
+
+    @property
+    def bytes_written(self) -> int:
+        return self.path.stat().st_size if self.path.exists() else 0
 
     @property
     def next_index(self) -> int:
@@ -143,10 +156,17 @@ class Download:
 
         A counter kept alongside the data can disagree with it after a crash
         between the write and the counter update. The file length cannot.
+
+        The final chunk is almost always SHORTER than chunk_size, so a plain
+        `size // chunk_size` undercounts by one once the last chunk lands and
+        the download never registers as complete. Comparing against the total
+        image size first is what makes the arithmetic correct for every image
+        rather than only for those whose length happens to divide evenly.
         """
-        if not self.path.exists():
-            return 0
-        return self.path.stat().st_size // self.chunk_size
+        written = self.bytes_written
+        if self.size_bytes and written >= self.size_bytes:
+            return self.chunk_count
+        return written // self.chunk_size
 
     @property
     def complete(self) -> bool:
@@ -169,6 +189,14 @@ class Download:
             return False           # already written
         if index > expected_index:
             return False           # gap: wait for the one we need
+
+        # Decrypt FIRST, then hash. The manifest's chunk hashes are of the
+        # plaintext image, so the integrity guarantee means the same thing
+        # whether or not encryption is on -- and the device ends up verifying
+        # the bytes it will actually flash, not a ciphertext wrapper around
+        # them.
+        if self.content_key is not None:
+            data = decrypt_chunk(self.content_key, index, data, self.firmware_id)
 
         expected_hash = self.chunk_hashes[index]
         actual = hashlib.sha256(data).hexdigest()
@@ -229,6 +257,7 @@ class Download:
             nonce=manifest["nonce"],
             path=path,
             manifest=manifest,
+            size_bytes=manifest.get("size", 0),
             is_rollback=is_rollback,
         )
 
@@ -292,6 +321,61 @@ class FailureInjector:
         keeping the previous slot intact until the new one proves itself.
         """
         return self.mode == "bad_boot" and self.active
+
+
+# ----------------------------------------------------------- confidentiality
+# Mirrors app/core/crypto.py on the server. Re-implemented rather than shared,
+# for the same reason as signature verification: the ESP32 firmware is C and
+# cannot import Python, so the protocol has to be independently implementable
+# from its specification. What must never drift is the KDF info string and the
+# nonce derivation -- get either wrong and decryption fails on valid firmware.
+
+KEK_INFO = b"convoy-kek-v1"
+GCM_NONCE_BYTES = 12
+
+
+def generate_keypair() -> tuple[str, str]:
+    """(private_hex, public_hex). Called once, on first boot."""
+    private = X25519PrivateKey.generate()
+    return (private.private_bytes_raw().hex(),
+            private.public_key().public_bytes_raw().hex())
+
+
+def unwrap_content_key(manifest: dict, private_hex: str, device_id: str) -> bytes:
+    """Recover the campaign's AES key using this device's X25519 private key.
+
+    Only the holder of that private key can complete the ECDH, which is what
+    keeps the firmware unreadable to the broker carrying it.
+    """
+    try:
+        private = X25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex))
+        ephemeral_public = X25519PublicKey.from_public_bytes(
+            bytes.fromhex(manifest["enc_ephemeral_public"]))
+        kek = HKDF(
+            algorithm=hashes.SHA256(), length=32, salt=None,
+            info=KEK_INFO + b"|" + device_id.encode() + b"|"
+                 + manifest["campaign_id"].encode(),
+        ).derive(private.exchange(ephemeral_public))
+        return AESGCM(kek).decrypt(
+            bytes.fromhex(manifest["enc_wrap_nonce"]),
+            bytes.fromhex(manifest["enc_wrapped_key"]), None)
+    except Exception as exc:
+        raise ManifestRejected(
+            ReasonCode.FAILED_SIGNATURE_INVALID,
+            f"cannot unwrap the content key: {type(exc).__name__}")
+
+
+def decrypt_chunk(content_key: bytes, index: int, ciphertext: bytes,
+                  firmware_id: str) -> bytes:
+    aad = f"{firmware_id}:{index}".encode()
+    try:
+        return AESGCM(content_key).decrypt(
+            index.to_bytes(GCM_NONCE_BYTES, "big"), ciphertext, aad)
+    except Exception:
+        # GCM authenticates as well as encrypts, so a failure here means the
+        # chunk was tampered with or the key is wrong -- both fatal.
+        raise ManifestRejected(ReasonCode.FAILED_CHUNK_HASH_MISMATCH,
+                               f"chunk {index} failed authenticated decryption")
 
 
 def decode_chunk(payload: dict) -> tuple[int, bytes, str]:

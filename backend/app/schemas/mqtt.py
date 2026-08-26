@@ -40,6 +40,7 @@ class HelloMessage(Envelope):
     battery: int | None = None
     network_quality: int | None = None
     failure_profile: dict | None = None
+    x25519_public_key: str | None = None
     resume_pending: bool = False
     agent: str | None = None
     trigger: str | None = None

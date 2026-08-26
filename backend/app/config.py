@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     firmware_signing_private_key_path: Path | None = None
     firmware_signing_private_key: str | None = None
     firmware_storage_dir: Path = REPO_ROOT / "backend" / "storage" / "firmware"
+    # AES-256-GCM over each chunk, with the content key wrapped per device via
+    # X25519. Signing proves firmware is AUTHENTIC; this keeps it SECRET from
+    # the broker, which the threat model treats as untrusted.
+    #
+    # Off by default so a fleet of devices that predate key publication keeps
+    # working. Turn it on once every device has sent an x25519_public_key --
+    # the orchestrator refuses to offer to a device without one rather than
+    # quietly falling back to plaintext.
+    firmware_encryption_enabled: bool = False
 
     # ---- api ---------------------------------------------------------------
     api_host: str = "0.0.0.0"

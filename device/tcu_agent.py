@@ -144,12 +144,20 @@ def load_state() -> dict:
             return json.loads(STATE_FILE.read_text())
         except json.JSONDecodeError:
             log.warning("state file corrupt, starting fresh")
+    priv, pub = ota.generate_keypair()
+    log.info("generated device keypair, public=%s", pub[:16] + "...")
     return {
         "current_version": os.getenv("INITIAL_VERSION", "1.3.0"),
         "active_slot": "A",
         "previous_version": None,
-        "resume": None,          # {campaign_id, firmware_id, next_chunk, ...}
+        "resume": None,
         "min_allowed_version_code": 0,
+        # X25519 keypair for firmware confidentiality. Generated once, on first
+        # boot, and persisted with the rest of the device state -- a real ECU
+        # would hold this in secure storage. The private half NEVER leaves the
+        # device; only the public half is published.
+        "x25519_private": priv,
+        "x25519_public": pub,
     }
 
 
@@ -176,6 +184,17 @@ def save_state(state: dict) -> bool:
 
 
 state = load_state()
+
+# A device provisioned before confidentiality existed has no keypair. Generate
+# one now rather than refusing to start: the server skips devices without a
+# published key, so the device would otherwise be silently excluded from every
+# encrypted campaign with no way to recover.
+if not state.get("x25519_private"):
+    _priv, _pub = ota.generate_keypair()
+    state["x25519_private"] = _priv
+    state["x25519_public"] = _pub
+    save_state(state)
+    log.info("generated device keypair on upgrade, public=%s", _pub[:16] + "...")
 battery = float(BATTERY_LEVEL)
 started_at = time.time()
 stop = threading.Event()
@@ -205,6 +224,7 @@ def publish_hello(client: mqtt.Client, trigger: str) -> None:
         battery=round(battery),
         network_quality=NETWORK_QUALITY,
         failure_profile={"mode": FAILURE_MODE, "p": FAILURE_PROBABILITY},
+        x25519_public_key=state.get("x25519_public"),
         resume_pending=state.get("resume") is not None,
         agent="tcu-agent/0.1",
         trigger=trigger,
@@ -237,6 +257,13 @@ def on_connect(client, _userdata, _flags, rc, properties=None):
         global active, injector, is_rollback
         active = Download.from_manifest(
             resume["manifest"], STATE_DIR, resume.get("is_rollback", False))
+        # The content key was never written to disk -- it is re-derived from
+        # the persisted manifest and this device's private key. Storing it
+        # would leave firmware-decrypting material sitting in a state file
+        # long after the transfer that needed it.
+        if resume["manifest"].get("enc_alg", "none") != "none":
+            active.content_key = ota.unwrap_content_key(
+                resume["manifest"], state["x25519_private"], DEVICE_ID)
         is_rollback = active.is_rollback
         injector = FailureInjector(FAILURE_MODE, FAILURE_PROBABILITY,
                                    active.chunk_count)
@@ -377,6 +404,20 @@ def handle_offer(client: mqtt.Client, wire: dict) -> None:
     is_rollback = bool(manifest.get("rollback", False))
 
     active = Download.from_manifest(manifest, STATE_DIR, is_rollback)
+
+    if manifest.get("enc_alg", "none") != "none":
+        try:
+            active.content_key = ota.unwrap_content_key(
+                manifest, state["x25519_private"], DEVICE_ID)
+            log.info("firmware is encrypted (%s); content key unwrapped",
+                     manifest["enc_alg"])
+        except ManifestRejected as exc:
+            log.error("cannot unwrap content key: %s", exc)
+            client.publish(T_OTA_ACK, envelope(
+                schema="convoy.ack.v1", campaign_id=campaign_id, accepted=False,
+                reason_code=exc.reason, detail=exc.detail), qos=1)
+            active = None
+            return
     # A fresh offer starts a fresh slot. Any partial file from an abandoned
     # campaign is discarded rather than appended to -- resuming into the wrong
     # image would produce bytes that pass no hash and waste a whole transfer.
