@@ -398,7 +398,7 @@ def handle_chunk(client: mqtt.Client, payload: dict) -> None:
     if active is None or payload.get("campaign_id") != active.campaign_id:
         return  # stray chunk from a cancelled or previous campaign
 
-    index, data, sha = ota.decode_chunk(payload)
+    index, data, _sha = ota.decode_chunk(payload)
 
     injected = injector.at_chunk(index) if injector else None
     if injected:
@@ -410,9 +410,15 @@ def handle_chunk(client: mqtt.Client, payload: dict) -> None:
         data = injector.corrupt(index, data)
 
     try:
-        active.accept_chunk(index, data, sha)
+        written = active.accept_chunk(index, data)
     except ManifestRejected as exc:
         fail_update(client, active.campaign_id, exc.reason, exc.detail, index)
+        return
+
+    if not written:
+        # Already have it, or it arrived out of order. Both happen normally:
+        # QoS 1 redelivers, and a resume can overlap a stream still in flight.
+        # Dropping them is what keeps the file a faithful prefix of the image.
         return
 
     client.publish(T_OTA_PROGRESS, envelope(
@@ -420,15 +426,11 @@ def handle_chunk(client: mqtt.Client, payload: dict) -> None:
         chunk_index=index, chunk_count=active.chunk_count,
         percent=round(active.percent, 1)), qos=1)
 
-    # Persist resume state periodically, not per chunk: a write every chunk
-    # would dominate the transfer cost, and losing at most 8 chunks of progress
-    # is an acceptable trade for a download measured in seconds.
-    if index % 8 == 0 or active.complete:
-        state["resume"] = {"campaign_id": active.campaign_id,
-                           "firmware_id": active.firmware_id,
-                           "next_chunk": active.next_index}
-        save_state(state)
-
+    # No periodic state write for the chunk index any more. Progress IS the
+    # file, and the chunk was fsynced inside accept_chunk before this line, so
+    # a counter written separately could only ever disagree with it. The state
+    # file records WHICH download is in flight, and that was written once when
+    # the offer was accepted.
     if active.complete:
         install(client)
 
