@@ -209,7 +209,7 @@ def publish_hello(client: mqtt.Client, trigger: str) -> None:
         agent="tcu-agent/0.1",
         trigger=trigger,
     ), qos=1)
-    log.info("announced v%s battery=%d% net=%d profile=%s (trigger=%s)",
+    log.info("announced v%s battery=%d%% net=%d profile=%s (trigger=%s)",
              state["current_version"], round(battery), NETWORK_QUALITY,
              FAILURE_MODE, trigger)
 
