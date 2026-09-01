@@ -66,6 +66,7 @@ export interface Campaign {
   campaign_id: string;
   name: string;
   state: string;
+  is_rollback?: boolean;
   firmware_id: string;
   batch_size_initial: number;
   current_batch_size: number;
@@ -84,6 +85,17 @@ export interface Campaign {
   targets?: Target[];
   batches?: Batch[];
   decisions?: Decision[];
+}
+
+export interface HealthSample {
+  battery: number;
+  network_quality: number;
+  ts: string;
+}
+
+export interface DeviceDetail extends Device {
+  health: HealthSample[];
+  events: FleetEvent[];
 }
 
 export interface FleetEvent {
@@ -117,11 +129,27 @@ export const api = {
   campaigns: () => get<Campaign[]>("/api/campaigns"),
   campaign: (id: string) => get<Campaign>(`/api/campaigns/${id}`),
   events: (limit = 60) => get<FleetEvent[]>(`/api/events?limit=${limit}`),
+  device: (deviceId: string) => get<DeviceDetail>(`/api/devices/${deviceId}`),
   timeline: (deviceId: string, campaignId?: string) =>
     get<FleetEvent[]>(
       `/api/devices/${deviceId}/timeline${campaignId ? `?campaign_id=${campaignId}` : ""}`,
     ),
 };
+
+/** Ask a device to report right now. Goes through the server-side proxy for
+ *  the same reason campaign actions do: the admin token stays out of the
+ *  browser bundle. */
+export async function pingDevice(deviceId: string): Promise<Device & {
+  responded: boolean;
+}> {
+  const res = await fetch("/api/ping-device", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceId }),
+  });
+  if (!res.ok) throw new Error(`ping failed: ${res.status}`);
+  return res.json();
+}
 
 /** Mutating calls go through a Next route handler so the admin token stays
  *  on the server and never reaches the browser bundle. */

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -52,6 +53,7 @@ from app.db.models import (
     RolloutDecision,
 )
 from app.db.session import check_connection, dispose_engine, get_session
+from app.mqtt import topics
 from app.mqtt.bridge import MqttBridge
 from app.services.eventbus import Channel, bus
 
@@ -197,6 +199,47 @@ async def device_timeline(device_id: str, campaign_id: str | None = None,
 
 
 # ---------------------------------------------------------------- firmware --
+@app.post("/api/devices/{device_id}/ping", dependencies=[Depends(require_admin)])
+async def ping_device(device_id: str,
+                      session: AsyncSession = Depends(get_session)) -> dict:
+    """Ask one device to report right now, and return what it says.
+
+    The fleet already heartbeats every five seconds, so this is not about
+    getting data the server lacks -- it is about ANSWERING A QUESTION. When an
+    operator is looking at a device and wondering whether the screen is current
+    or stale, a passive wait offers no way to find out. Pinging turns "I think
+    this is live" into "I just asked, and it replied".
+    """
+    device = await session.scalar(select(Device).where(Device.device_id == device_id))
+    if device is None:
+        raise HTTPException(404, f"unknown device {device_id}")
+
+    bridge: MqttBridge = state["bridge"]
+    if not bridge.ready.is_set():
+        raise HTTPException(503, "broker not connected")
+
+    before = device.last_seen_at
+    await bridge.publish(topics.server_topic(device_id, topics.ServerLeaf.CMD), {
+        "schema": "convoy.cmd.v1", "msg_id": str(uuid.uuid4()),
+        "cmd": "announce", "jitter_s": 0,
+    })
+
+    # Poll briefly for a fresher reading rather than sleeping a fixed time:
+    # a device on a good link answers in a few hundred milliseconds, and making
+    # the operator wait the worst case every time would make the button feel
+    # broken.
+    for _ in range(24):
+        await asyncio.sleep(0.25)
+        await session.commit()
+        fresh = await session.scalar(
+            select(Device).where(Device.device_id == device_id))
+        if fresh and fresh.last_seen_at != before:
+            return {"responded": True, **_device_dict(fresh)}
+
+    return {"responded": False, **_device_dict(device),
+            "detail": "no reply within 6s"}
+
+
 @app.get("/api/firmware")
 async def list_firmware(session: AsyncSession = Depends(get_session)) -> list[dict]:
     rows = list(await session.scalars(

@@ -19,6 +19,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { Nav } from "@/components/Nav";
 import { api, type Campaign } from "@/lib/api";
 
 export default function AnalyticsPage() {
@@ -62,17 +63,7 @@ export default function AnalyticsPage() {
 
   return (
     <main className="mx-auto max-w-[1400px] px-6 py-5">
-      <header className="flex flex-wrap items-center justify-between gap-3 pb-4">
-        <div className="flex items-baseline gap-4">
-          <a href="/" className="font-display text-lead font-bold tracking-[0.18em]">
-            CONVOY
-          </a>
-          <span className="legend">Analytics</span>
-        </div>
-        <a href="/" className="font-mono text-data text-ink-mute underline">
-          Back to live campaign
-        </a>
-      </header>
+      <Nav />
 
       <section className="panel mb-3 p-4">
         <div className="legend mb-3">Campaign</div>
