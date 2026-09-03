@@ -92,6 +92,8 @@ received bytes rather than re-serialising, which is the more robust discipline.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import secrets
@@ -164,9 +166,29 @@ class SignedManifest:
     signature: bytes
 
     def to_wire(self) -> dict:
-        """What actually goes on the MQTT topic."""
+        """What actually goes on the MQTT topic.
+
+        The manifest travels as BASE64 OF THE EXACT SIGNED BYTES, not as a
+        nested JSON object.
+
+        The earlier format sent the manifest as a normal object and expected
+        each receiver to reconstruct the canonical encoding (sorted keys, no
+        whitespace) before verifying. That works when both ends are Python and
+        can call json.dumps with matching arguments. It does not survive
+        contact with a second language: ArduinoJson on the ESP32 has no
+        key-sorting serialiser, so the board could parse the manifest but could
+        not reproduce the bytes that were signed, and would reject every valid
+        offer.
+
+        The usual response to that is to relax verification, which destroys the
+        property the signature exists to provide. The correct response is to
+        stop asking receivers to reconstruct anything: transmit the signed
+        bytes verbatim, verify the signature against exactly those bytes, and
+        only then parse them. A receiver in any language can do that with a
+        base64 decoder and an Ed25519 verifier.
+        """
         return {
-            "manifest": self.manifest,
+            "manifest_b64": base64.b64encode(canonical_bytes(self.manifest)).decode(),
             "signature": self.signature.hex(),
             "sig_alg": "ed25519",
         }
@@ -207,19 +229,28 @@ def verify_manifest(
     acting on it before checking the signature would mean acting on attacker-
     controlled data.
     """
-    manifest = wire.get("manifest")
+    manifest_b64 = wire.get("manifest_b64")
     signature_hex = wire.get("signature")
-    if not isinstance(manifest, dict) or not isinstance(signature_hex, str):
+    if not isinstance(manifest_b64, str) or not isinstance(signature_hex, str):
         raise ManifestRejected("FAILED_SIGNATURE_INVALID", "malformed offer envelope")
     if wire.get("sig_alg") != "ed25519":
         raise ManifestRejected("FAILED_SIGNATURE_INVALID",
                                f"unsupported algorithm {wire.get('sig_alg')!r}")
 
-    # 1. Provenance, before anything else.
+    # 1. Provenance, over the bytes as received. Nothing is re-serialised and
+    #    nothing is parsed until the signature has been checked, so no field
+    #    can influence anything before it has been proven authentic.
     try:
-        public_key.verify(bytes.fromhex(signature_hex), canonical_bytes(manifest))
-    except (InvalidSignature, ValueError) as exc:
+        signed_bytes = base64.b64decode(manifest_b64, validate=True)
+        public_key.verify(bytes.fromhex(signature_hex), signed_bytes)
+    except (InvalidSignature, ValueError, binascii.Error) as exc:
         raise ManifestRejected("FAILED_SIGNATURE_INVALID", str(exc) or "bad signature")
+
+    try:
+        manifest = json.loads(signed_bytes)
+    except json.JSONDecodeError as exc:
+        raise ManifestRejected("FAILED_SIGNATURE_INVALID",
+                               f"signed payload is not JSON: {exc}")
 
     # 2. Addressed to this device.
     if manifest.get("device_id") != expected_device_id:

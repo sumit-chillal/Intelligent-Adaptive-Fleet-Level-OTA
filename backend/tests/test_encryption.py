@@ -136,13 +136,20 @@ def test_attacker_cannot_swap_in_their_own_wrapped_key():
     supplied — authenticity of the image would be intact while its CONTENT was
     entirely attacker-chosen.
     """
+    import base64
+    import json
+
     priv, pub = generate_device_keypair()
     _, _, _, wire = offer(priv, pub)
 
     evil_priv, evil_pub = generate_device_keypair()
     evil = wrap_content_key(new_content_key(), evil_pub,
                             device_id="tcu_D_001", campaign_id="c_e")
-    wire["manifest"].update(evil)
+
+    manifest = json.loads(base64.b64decode(wire["manifest_b64"]))
+    manifest.update(evil)
+    wire["manifest_b64"] = base64.b64encode(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).decode()
 
     with pytest.raises(ManifestRejected) as exc:
         verify_manifest(wire, SERVER_PUB, expected_device_id="tcu_D_001")

@@ -34,6 +34,29 @@ def make_offer(device_id="tcu_B_001", campaign_id="c_demo", rollback=False,
     return pkg, manifest, sign_manifest(manifest, key).to_wire()
 
 
+
+
+def tamper(wire: dict, **changes) -> dict:
+    """Modify fields inside the SIGNED payload and re-encode it.
+
+    The manifest now travels as base64 of the exact signed bytes, so tampering
+    means decoding, editing, and re-encoding — which is precisely what an
+    attacker would have to do, and precisely what the signature detects. This
+    is a stronger test than editing a nested object was, because it exercises
+    the real attack path rather than a convenience representation.
+    """
+    import base64
+    import json
+
+    manifest = json.loads(base64.b64decode(wire["manifest_b64"]))
+    manifest.update(changes)
+    out = dict(wire)
+    out["manifest_b64"] = base64.b64encode(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False).encode()).decode()
+    return out
+
+
 # ------------------------------------------------------------- happy path ----
 def test_genuine_manifest_is_accepted():
     _, manifest, wire = make_offer()
@@ -57,9 +80,9 @@ def test_manifest_signed_with_an_attacker_key_is_rejected():
 def test_tampering_with_the_image_hash_is_rejected():
     """Swap the payload, keep the genuine signature."""
     _, _, wire = make_offer()
-    wire["manifest"]["sha256"] = "0" * 64
     with pytest.raises(ManifestRejected) as exc:
-        verify_manifest(wire, SERVER_PUB, expected_device_id="tcu_B_001")
+        verify_manifest(tamper(wire, sha256="0" * 64), SERVER_PUB,
+                        expected_device_id="tcu_B_001")
     assert exc.value.reason == "FAILED_SIGNATURE_INVALID"
 
 
@@ -67,9 +90,9 @@ def test_tampering_with_any_field_is_rejected():
     for field, value in [("version", "9.9.9"), ("size", 1), ("min_battery", 0),
                          ("chunk_count", 1), ("rollback", True)]:
         _, _, wire = make_offer()
-        wire["manifest"][field] = value
         with pytest.raises(ManifestRejected):
-            verify_manifest(wire, SERVER_PUB, expected_device_id="tcu_B_001")
+            verify_manifest(tamper(wire, **{field: value}), SERVER_PUB,
+                            expected_device_id="tcu_B_001")
 
 
 # ------------------------------------------- ATTACK 3: lateral replay --------

@@ -160,8 +160,15 @@ def test_attacker_cannot_add_the_rollback_flag():
     """The flag is INSIDE the signature. Flipping it invalidates the manifest,
     so the ability to authorise a downgrade belongs to whoever holds the
     signing key and nobody else."""
+    import base64
+    import json
+
     wire = make_offer("1.4.0", rollback=False)
-    wire["manifest"]["rollback"] = True
+    manifest = json.loads(base64.b64decode(wire["manifest_b64"]))
+    manifest["rollback"] = True
+    wire["manifest_b64"] = base64.b64encode(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).decode()
+
     with pytest.raises(ManifestRejected) as exc:
         verify_manifest(wire, SERVER_PUB, expected_device_id="tcu_D_001",
                         min_allowed_version_code=version_to_code("1.5.0"))

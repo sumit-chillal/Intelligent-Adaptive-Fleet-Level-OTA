@@ -82,20 +82,34 @@ def canonical_bytes(manifest: dict) -> bytes:
 
 def verify_offer(wire: dict, public_key: Ed25519PublicKey, *, device_id: str,
                  min_allowed_version_code: int = 0) -> dict:
-    """Check provenance FIRST, then the fields. Raises ManifestRejected."""
-    manifest = wire.get("manifest")
+    """Check provenance FIRST, then the fields. Raises ManifestRejected.
+
+    The manifest arrives as base64 of the exact bytes the server signed. It is
+    verified as received and only then parsed, so no field can influence any
+    decision before it has been proven authentic. Nothing is re-serialised,
+    which is what allows the ESP32 firmware to implement the same check without
+    a key-sorting JSON writer.
+    """
+    manifest_b64 = wire.get("manifest_b64")
     signature_hex = wire.get("signature")
-    if not isinstance(manifest, dict) or not isinstance(signature_hex, str):
+    if not isinstance(manifest_b64, str) or not isinstance(signature_hex, str):
         raise ManifestRejected(ReasonCode.FAILED_SIGNATURE_INVALID,
                                "malformed offer envelope")
     if wire.get("sig_alg") != "ed25519":
         raise ManifestRejected(ReasonCode.FAILED_SIGNATURE_INVALID,
                                f"unsupported algorithm {wire.get('sig_alg')!r}")
     try:
-        public_key.verify(bytes.fromhex(signature_hex), canonical_bytes(manifest))
+        signed_bytes = base64.b64decode(manifest_b64, validate=True)
+        public_key.verify(bytes.fromhex(signature_hex), signed_bytes)
     except (InvalidSignature, ValueError) as exc:
         raise ManifestRejected(ReasonCode.FAILED_SIGNATURE_INVALID,
                                str(exc) or "bad signature")
+
+    try:
+        manifest = json.loads(signed_bytes)
+    except json.JSONDecodeError as exc:
+        raise ManifestRejected(ReasonCode.FAILED_SIGNATURE_INVALID,
+                               f"signed payload is not JSON: {exc}")
 
     # Only now is it safe to trust any field.
     if manifest.get("device_id") != device_id:
