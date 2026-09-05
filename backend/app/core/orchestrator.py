@@ -331,7 +331,7 @@ class Orchestrator:
             # every campaign starts again at chunk 0.
             key_wrap = None
             content_key = None
-            if settings.firmware_encryption_enabled:
+            if campaign.encrypted:
                 if not device.x25519_public_key:
                     # Cannot encrypt for a device that has not published a key.
                     # Refusing is the right call: silently falling back to
@@ -350,7 +350,10 @@ class Orchestrator:
                         source="server",
                         payload={"detail": "encryption enabled but the device "
                                            "has published no X25519 public key"})
-                    log.warning("no_device_key", device_id=device.device_id)
+                    log.warning("no_device_key", device_id=device.device_id,
+                                hint="this campaign is encrypted but the device "
+                                     "has published no X25519 key; create the "
+                                     "campaign with --no-encryption to reach it")
                     continue
 
                 content_key = self._campaign_key(campaign.campaign_id)
@@ -605,8 +608,13 @@ class Orchestrator:
             async with session_scope() as session:
                 pkg = await self._package(session, firmware_id)
 
-            content_key = (self._campaign_key(campaign_id)
-                           if settings.firmware_encryption_enabled else None)
+            # Read from the campaign so a mixed fleet can run encrypted and
+            # plain rollouts side by side.
+            async with session_scope() as session:
+                campaign = await session.scalar(
+                    select(Campaign).where(Campaign.campaign_id == campaign_id))
+                encrypted = bool(campaign and campaign.encrypted)
+            content_key = self._campaign_key(campaign_id) if encrypted else None
 
             topic = topics.server_topic(device_id, topics.ServerLeaf.OTA_CHUNK)
             for index in range(start_index, pkg.chunk_count):

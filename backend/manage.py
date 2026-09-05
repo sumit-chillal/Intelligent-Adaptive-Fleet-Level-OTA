@@ -258,6 +258,7 @@ async def cmd_campaign_create(args) -> int:
                 min_network_quality=args.min_network,
                 abort_threshold=args.abort_threshold,
                 max_attempts=args.max_attempts,
+                encrypted=args.encrypted,
             )
         except cs.CampaignError as exc:
             print(f"{R}{exc}{RESET}")
@@ -276,6 +277,8 @@ async def cmd_campaign_create(args) -> int:
               f"{campaign.abort_threshold:.0%}")
         print(f"  max attempts     {campaign.max_attempts}"
               f"{'  (no retries)' if campaign.max_attempts == 1 else ''}")
+        print(f"  encryption       "
+              f"{'AES-256-GCM' if campaign.encrypted else 'off (plaintext)'}")
         print(f"\n  state is DRAFT. The orchestrator will start it.\n")
     return 0
 
@@ -455,6 +458,16 @@ def build_parser() -> argparse.ArgumentParser:
             # Memory.md D15: the demo needs 0.50, not the 0.40 default.
             c.add_argument("--abort-threshold", type=float,
                            help="failure rate that aborts the campaign (demo: 0.5)")
+            enc = c.add_mutually_exclusive_group()
+            enc.add_argument("--encryption", dest="encrypted",
+                             action="store_true", default=None,
+                             help="encrypt chunks; every target must have "
+                                  "published an X25519 key")
+            enc.add_argument("--no-encryption", dest="encrypted",
+                             action="store_false",
+                             help="send plaintext chunks — needed for devices "
+                                  "without encryption support, such as the "
+                                  "ESP32 before stage 3")
             c.add_argument("--max-attempts", type=int,
                            help="attempts per device before giving up. "
                                 "1 = no retries, which keeps a permanently "

@@ -469,6 +469,7 @@ def _campaign_dict(c: Campaign) -> dict:
     return {
         "campaign_id": c.campaign_id, "name": c.name, "state": c.state,
         "is_rollback": c.is_rollback,
+        "encrypted": c.encrypted,
         "firmware_id": c.firmware_id,
         "batch_size_initial": c.batch_size_initial,
         "current_batch_size": c.current_batch_size,

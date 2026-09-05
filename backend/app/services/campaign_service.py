@@ -121,6 +121,10 @@ async def dry_run(session: AsyncSession, *, firmware_id: str,
         target_version_code=firmware.version_code,
         offline_ttl_seconds=settings.device_offline_ttl_seconds,
         is_rollback=is_rollback,
+        # Falls back to the global default when not stated, so existing
+        # behaviour is unchanged for anyone who does not pass the flag.
+        encrypted=(settings.firmware_encryption_enabled
+                   if encrypted is None else encrypted),
     )
 
     out: list[DryRunEntry] = []
@@ -164,6 +168,7 @@ async def create_campaign(
     abort_threshold: float | None = None,
     max_attempts: int | None = None,
     is_rollback: bool = False,
+    encrypted: bool | None = None,
     created_by: str = "cli",
 ) -> tuple[Campaign, int]:
     """Create a campaign and materialise its targets. Returns (campaign, count)."""
@@ -192,6 +197,10 @@ async def create_campaign(
         selector=selector.to_dict(),
         state=str(CampaignState.DRAFT),
         is_rollback=is_rollback,
+        # Falls back to the global default when not stated, so existing
+        # behaviour is unchanged for anyone who does not pass the flag.
+        encrypted=(settings.firmware_encryption_enabled
+                   if encrypted is None else encrypted),
         batch_size_initial=batch_size or settings.default_batch_size,
         batch_size_min=batch_size_min or settings.default_batch_size_min,
         batch_size_max=batch_size_max or settings.default_batch_size_max,

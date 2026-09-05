@@ -240,6 +240,12 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
   }
 
   String t = String(topic);
+
+  // Log every inbound message before doing anything with it. When a device
+  // goes silent the first question is always whether the message arrived at
+  // all, and without this line that question is unanswerable from the board.
+  Serial.printf("<- %s (%u bytes, heap %u)\n", topic, length, ESP.getFreeHeap());
+
   if (t == T_OTA_OFFER) {
     handleOffer(String((char*)payload).substring(0, length));
     return;
@@ -352,9 +358,16 @@ void failUpdate(const char* reason, const String& detail, int chunkIndex) {
  * which ArduinoJson cannot do.
  */
 void handleOffer(const String& payload) {
+  Serial.printf("offer received: %u bytes, free heap %u\n",
+                payload.length(), ESP.getFreeHeap());
+
   JsonDocument wire;
-  if (deserializeJson(wire, payload)) {
-    Serial.println("offer: undecodable envelope");
+  DeserializationError err = deserializeJson(wire, payload);
+  if (err) {
+    // NoMemory here means the JSON parsed larger than the heap allows, which
+    // is a different problem from a truncated message and needs a different
+    // fix, so the reason is printed rather than swallowed.
+    Serial.printf("offer: undecodable envelope (%s)\n", err.c_str());
     return;
   }
 
@@ -416,8 +429,11 @@ void handleOffer(const String& payload) {
 
   // ---- now the fields can be trusted ------------------------------------
   JsonDocument m;
-  if (deserializeJson(m, signedBytes.data(), signedLen)) {
-    Serial.println("offer REJECTED: signed payload is not JSON");
+  DeserializationError merr = deserializeJson(m, signedBytes.data(), signedLen);
+  if (merr) {
+    Serial.printf("offer REJECTED: signed payload not parseable (%s), "
+                  "%u bytes, heap %u\n", merr.c_str(), signedLen,
+                  ESP.getFreeHeap());
     return;
   }
 
@@ -697,11 +713,24 @@ void connectMqtt() {
   netClient.setCACert(BROKER_ROOT_CA);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMessage);
-  // Chunk payloads in stage 2 are ~11 KB after base64. The default 256-byte
-  // buffer would silently drop them, so it is raised now rather than being
-  // discovered as a mystery later.
-  mqtt.setBufferSize(16384);
+  // Two different large payloads have to fit in this buffer.
+  //
+  // A chunk is ~11 KB after base64. The OFFER is bigger and less obvious: the
+  // manifest carries one SHA-256 per chunk, so a 1 MB image at 8 KB chunks
+  // means 128 hashes of 64 characters — over 8 KB of hashes alone, ~12 KB once
+  // the manifest is base64-encoded inside the envelope.
+  //
+  // PubSubClient does not report an oversized packet. It drops it and returns
+  // to the loop, so the symptom is a device that stays silent while the server
+  // waits for an ack it will never receive. 24 KB leaves room for a 2 MB image
+  // at the same chunk size.
+  if (!mqtt.setBufferSize(24576)) {
+    Serial.println("FATAL: could not allocate the 24 KB MQTT buffer");
+  }
   mqtt.setKeepAlive(20);
+  // A 12 KB payload over TLS on a weak link can take a while to assemble.
+  // The 15 s default can expire mid-read and abandon a valid message.
+  mqtt.setSocketTimeout(30);
 
   while (!mqtt.connected()) {
     String clientId = String(DEVICE_ID) + "-" + String(esp_random(), HEX);
@@ -786,6 +815,7 @@ void setup() {
 
   Serial.printf("\n=== CONVOY %s === v%s slot %s\n",
                 DEVICE_ID, currentVersion.c_str(), activeSlot.c_str());
+  Serial.printf("free heap at boot: %u bytes\n", ESP.getFreeHeap());
 
   String root = MQTT_TOPIC_ROOT;
   String id = DEVICE_ID;

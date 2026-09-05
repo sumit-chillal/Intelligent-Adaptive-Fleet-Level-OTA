@@ -191,6 +191,20 @@ class Campaign(Base):
     # path is a recovery path nobody has tested.
     is_rollback: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Encryption is a PER-CAMPAIGN policy, not a global switch.
+    #
+    # A global flag assumes every device in the fleet has the same
+    # capabilities. That held while the fleet was fifteen identical
+    # containers, and stopped holding the moment a hardware device joined:
+    # the ESP32 publishes no X25519 key until its own encryption support
+    # lands, so a global flag either blocks it from every campaign or forces
+    # the whole fleet back to plaintext. Neither is acceptable.
+    #
+    # As a campaign setting, an operator can encrypt a rollout to devices that
+    # support it and run a separate plain rollout to those that do not, and
+    # each campaign records what it actually did.
+    encrypted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     # ---- rollout policy: every knob the adaptive engine reads --------------
     batch_size_initial: Mapped[int] = mapped_column(Integer, default=5)
     batch_size_min: Mapped[int] = mapped_column(Integer, default=1)
