@@ -692,6 +692,8 @@ void confirmBootIfPending() {
 // ===========================================================================
 // Connection
 // ===========================================================================
+void syncClock();
+
 void connectWifi() {
   screen("CONVOY", String("connecting"), String(WIFI_SSID));
   setLed(LED_BUSY);
@@ -707,6 +709,52 @@ void connectWifi() {
   Serial.printf("\nWiFi connected, ip=%s rssi=%d\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
   screen("CONVOY", "wifi ok", WiFi.localIP().toString());
+  syncClock();
+}
+
+/**
+ * Get the wall-clock time before attempting TLS.
+ *
+ * An ESP32 has no battery-backed real-time clock. It boots believing it is
+ * 1 January 1970, and certificate validation compares the certificate's
+ * notBefore and notAfter dates against that. Against a 1970 clock every real
+ * certificate looks "not yet valid", so the handshake fails -- and it fails
+ * with a bare connection error that says nothing about time, which sends you
+ * hunting for a wrong password or a truncated certificate instead.
+ *
+ * The alternative is setInsecure(), which makes the symptom disappear by
+ * disabling the check that produced it. That would leave the board willing to
+ * talk to anything presenting any certificate, which is precisely the attack
+ * the design spends an Ed25519 signature defending against elsewhere.
+ */
+void syncClock() {
+  configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+  Serial.print("waiting for time");
+  screen("CONVOY", "syncing clock", "for TLS...");
+
+  time_t now = 0;
+  int tries = 0;
+  // Any value past 2020 means NTP has answered; the exact epoch does not
+  // matter, only that it is no longer 1970.
+  while (now < 1600000000 && tries < 40) {
+    delay(500);
+    Serial.print(".");
+    time(&now);
+    tries++;
+  }
+
+  if (now < 1600000000) {
+    Serial.println("\nWARNING: no NTP response. TLS will fail because the "
+                   "certificate cannot be date-checked.");
+    screen("CONVOY", "clock sync FAILED", "TLS will fail");
+    return;
+  }
+
+  struct tm t;
+  gmtime_r(&now, &t);
+  Serial.printf("\ntime synced: %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                t.tm_hour, t.tm_min, t.tm_sec);
 }
 
 void connectMqtt() {
@@ -778,6 +826,17 @@ void connectMqtt() {
     } else {
       int st = mqtt.state();
       Serial.printf("broker refused, state=%d — retrying in 3s\n", st);
+      if (st == -2) {
+        // -2 is a TLS/connection failure, which has three usual causes and no
+        // way to tell them apart from the code alone. Naming them beats
+        // guessing.
+        time_t now;
+        time(&now);
+        Serial.printf("  state=-2 is a TLS failure. Check: clock synced "
+                      "(epoch now %ld, must be > 1600000000), "
+                      "BROKER_ROOT_CA complete, MQTT_HOST correct.\n",
+                      (long)now);
+      }
       // -2 is a TLS/connection failure (check the CA and the host);
       //  4 is bad credentials; 5 is not authorised.
       screen("CONVOY", "broker refused", "state " + String(st));

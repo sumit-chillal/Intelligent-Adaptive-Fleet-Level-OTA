@@ -43,3 +43,5 @@ Thumbs.db
 hardware/esp32-tcu/config.h
 
 backend/build/
+# Arduino compiled output
+hardware/esp32-tcu/build/
