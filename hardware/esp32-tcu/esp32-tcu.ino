@@ -33,6 +33,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "config.h"
 
@@ -728,25 +730,50 @@ void connectWifi() {
  * the design spends an Ed25519 signature defending against elsewhere.
  */
 void syncClock() {
+  // Seed the clock from the BUILD TIME before trying NTP.
+  //
+  // Certificate validation only needs the year to be roughly right. The build
+  // timestamp is baked in by the compiler and is always in the recent past,
+  // which satisfies notBefore and notAfter without any network at all.
+  //
+  // This matters because NTP is not always reachable. Many phone hotspots
+  // block outbound UDP port 123, so a device tethered to one waits forever for
+  // a reply that will never come, and the failure looks like a TLS problem
+  // rather than a blocked port.
+  //
+  // A build-time seed is not a substitute for real time -- it drifts, and a
+  // board flashed months ago would think it is months ago -- so NTP still runs
+  // afterwards to correct it. It just is not a precondition for connecting.
+  struct tm build = {0};
+  if (strptime(__DATE__ " " __TIME__, "%b %d %Y %H:%M:%S", &build)) {
+    time_t seed = mktime(&build);
+    struct timeval tv = {.tv_sec = seed, .tv_usec = 0};
+    settimeofday(&tv, nullptr);
+    Serial.printf("clock seeded from build time: %s %s\n", __DATE__, __TIME__);
+  }
+
   configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
-  Serial.print("waiting for time");
+  Serial.print("waiting for NTP");
   screen("CONVOY", "syncing clock", "for TLS...");
 
   time_t now = 0;
   int tries = 0;
-  // Any value past 2020 means NTP has answered; the exact epoch does not
-  // matter, only that it is no longer 1970.
-  while (now < 1600000000 && tries < 40) {
+  // Ten attempts, not forty. If NTP is blocked, waiting longer will not help,
+  // and the build-time seed is already good enough to proceed.
+  while (tries < 10) {
     delay(500);
     Serial.print(".");
     time(&now);
+    if (now > 1600000000 && tries > 2) break;
     tries++;
   }
 
+  time(&now);
   if (now < 1600000000) {
-    Serial.println("\nWARNING: no NTP response. TLS will fail because the "
-                   "certificate cannot be date-checked.");
-    screen("CONVOY", "clock sync FAILED", "TLS will fail");
+    Serial.println("\nWARNING: clock is not set and the build-time seed "
+                   "failed. TLS will fail: a certificate cannot be "
+                   "date-checked without a clock.");
+    screen("CONVOY", "clock FAILED", "TLS will fail");
     return;
   }
 
