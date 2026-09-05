@@ -74,10 +74,13 @@ struct OtaSession {
   uint32_t sizeBytes = 0;
   uint32_t nextIndex = 0;
   bool isRollback = false;
-  // Hex SHA-256 of each chunk, from the signed manifest. Held in RAM: 512
-  // chunks at 64 characters is 32 KB, which fits comfortably, and a 1 MB
-  // firmware image is only 128 chunks.
-  std::vector<String> chunkHashes;
+  // SHA-256 of each chunk, stored as RAW BYTES rather than hex Strings.
+  //
+  // 128 Arduino Strings of 64 characters cost roughly 10 KB once per-object
+  // overhead is counted, and each one is a separate heap allocation that
+  // fragments the space the chunk buffers need. 128 x 32 raw bytes is 4 KB in
+  // a single contiguous block.
+  std::vector<uint8_t> chunkHashes;   // chunkCount * 32 bytes
   String wholeSha256;
 };
 OtaSession ota;
@@ -86,8 +89,8 @@ OtaSession ota;
 // main .ino automatically, but only for simple signatures, and relying on that
 // is how a working sketch breaks after an unrelated edit. Declaring them
 // explicitly costs three lines and removes the ordering constraint entirely.
-void handleOffer(const String& payload);
-void handleChunk(const String& payload);
+void handleOffer(const uint8_t* payload, size_t len);
+void handleChunk(const uint8_t* payload, size_t len);
 void installUpdate();
 void confirmBootIfPending();
 void publishResult(bool success, const char* reason, const String& detail = "",
@@ -249,11 +252,11 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
   Serial.printf("<- %s (%u bytes, heap %u)\n", topic, length, ESP.getFreeHeap());
 
   if (t == T_OTA_OFFER) {
-    handleOffer(String((char*)payload).substring(0, length));
+    handleOffer(payload, length);
     return;
   }
   if (t == T_OTA_CHUNK) {
-    handleChunk(String((char*)payload).substring(0, length));
+    handleChunk(payload, length);
     return;
   }
 
@@ -348,6 +351,10 @@ void failUpdate(const char* reason, const String& detail, int chunkIndex) {
   publishResult(false, reason, detail, chunkIndex);
   ota.active = false;
   ota.chunkHashes.clear();
+  ota.chunkHashes.shrink_to_fit();
+  free(chunkBuf);
+  chunkBuf = nullptr;
+  chunkBufLen = 0;
 }
 
 /**
@@ -359,12 +366,15 @@ void failUpdate(const char* reason, const String& detail, int chunkIndex) {
  * authentic, and the board never has to reproduce a canonical JSON encoding,
  * which ArduinoJson cannot do.
  */
-void handleOffer(const String& payload) {
+void handleOffer(const uint8_t* payload, size_t len) {
   Serial.printf("offer received: %u bytes, free heap %u\n",
-                payload.length(), ESP.getFreeHeap());
+                len, ESP.getFreeHeap());
 
   JsonDocument wire;
-  DeserializationError err = deserializeJson(wire, payload);
+  // Parse straight from the network buffer. Wrapping it in a String first
+  // would copy 12 KB for no benefit, and that copy is exactly the kind of
+  // short-lived large allocation that fragments the heap.
+  DeserializationError err = deserializeJson(wire, payload, len);
   if (err) {
     // NoMemory here means the JSON parsed larger than the heap allows, which
     // is a different problem from a truncated message and needs a different
@@ -507,12 +517,21 @@ void handleOffer(const String& payload) {
   ota.isRollback = rollback;
   ota.nextIndex = 0;
 
-  ota.chunkHashes.clear();
-  ota.chunkHashes.reserve(ota.chunkCount);
+  // Convert hex to bytes once, here, rather than comparing hex strings 128
+  // times during the download.
+  ota.chunkHashes.assign((size_t)ota.chunkCount * 32, 0);
+  size_t idx = 0;
   for (JsonVariant v : m["chunk_hashes"].as<JsonArray>()) {
-    ota.chunkHashes.push_back(String(v.as<const char*>()));
+    if (idx >= ota.chunkCount) break;
+    if (!hexToBytes(String(v.as<const char*>()),
+                    &ota.chunkHashes[idx * 32], 32)) {
+      Serial.println("offer REJECTED: malformed chunk hash");
+      publishResult(false, Reason::SIG_INVALID, "malformed manifest");
+      return;
+    }
+    idx++;
   }
-  if (ota.chunkHashes.size() != ota.chunkCount) {
+  if (idx != ota.chunkCount) {
     Serial.println("offer REJECTED: chunk hash count mismatch");
     publishResult(false, Reason::SIG_INVALID, "malformed manifest");
     return;
@@ -546,12 +565,26 @@ void handleOffer(const String& payload) {
 }
 
 /** A chunk: decode, hash-check the plaintext, write it to the inactive slot. */
-void handleChunk(const String& payload) {
+// One decode buffer for the whole download, allocated when the offer is
+// accepted and freed when it ends.
+//
+// The previous version allocated an 11 KB vector inside the handler for every
+// chunk, on top of a String copy and a substring copy of the same message.
+// Roughly 44 KB of allocate-and-free per chunk left the heap too fragmented to
+// find a contiguous block after about nine chunks -- which is precisely where
+// the download stopped. Free memory was never the problem; contiguous free
+// memory was.
+static uint8_t* chunkBuf = nullptr;
+static size_t chunkBufLen = 0;
+
+void handleChunk(const uint8_t* payload, size_t len) {
   if (!ota.active) return;
 
   JsonDocument doc;
-  if (deserializeJson(doc, payload)) return;
-  if (String((const char*)(doc["campaign_id"] | "")) != ota.campaignId) return;
+  if (deserializeJson(doc, payload, len)) return;
+
+  const char* cid = doc["campaign_id"] | "";
+  if (ota.campaignId != cid) return;
 
   uint32_t index = doc["index"] | 0;
   if (index != ota.nextIndex) {
@@ -564,28 +597,39 @@ void handleChunk(const String& payload) {
   const char* dataB64 = doc["data"] | "";
   size_t b64Len = strlen(dataB64);
   size_t rawLen = 0;
-  std::vector<uint8_t> raw(b64Len);
-  if (mbedtls_base64_decode(raw.data(), raw.size(), &rawLen,
+  if (chunkBuf == nullptr || chunkBufLen < b64Len) {
+    free(chunkBuf);
+    chunkBuf = (uint8_t*)malloc(b64Len);
+    chunkBufLen = b64Len;
+    if (chunkBuf == nullptr) {
+      failUpdate(Reason::FLASH_WRITE, "out of memory for chunk buffer", index);
+      chunkBufLen = 0;
+      return;
+    }
+  }
+  if (mbedtls_base64_decode(chunkBuf, chunkBufLen, &rawLen,
                             (const uint8_t*)dataB64, b64Len) != 0) {
     failUpdate(Reason::CHUNK_HASH, "chunk " + String(index) + " bad base64", index);
     return;
   }
+  uint8_t* raw = chunkBuf;
 
   // Hash the plaintext against the value in the SIGNED manifest. A chunk that
   // was altered in transit fails here, before a byte of it reaches flash.
   SHA256 sha;
   uint8_t digest[32];
   sha.reset();
-  sha.update(raw.data(), rawLen);
+  sha.update(raw, rawLen);
   sha.finalize(digest, sizeof(digest));
 
-  if (bytesToHex(digest, 32) != ota.chunkHashes[index]) {
+  // Compare 32 bytes, not 64 hex characters. No allocation, no String.
+  if (memcmp(digest, &ota.chunkHashes[(size_t)index * 32], 32) != 0) {
     failUpdate(Reason::CHUNK_HASH,
                "chunk " + String(index) + " hash mismatch", index);
     return;
   }
 
-  if (Update.write(raw.data(), rawLen) != rawLen) {
+  if (Update.write(raw, rawLen) != rawLen) {
     failUpdate(Reason::FLASH_WRITE, "flash write failed at " + String(index), index);
     return;
   }
@@ -604,6 +648,10 @@ void handleChunk(const String& payload) {
 
   // Refresh the display every few chunks. Redrawing on every chunk would spend
   // more time on I2C than on the download.
+  if (index % 8 == 0 || ota.nextIndex == ota.chunkCount) {
+    Serial.printf("chunk %u/%u  heap %u\n", ota.nextIndex, ota.chunkCount,
+                  ESP.getFreeHeap());
+  }
   if (index % 4 == 0 || ota.nextIndex == ota.chunkCount) {
     int pct = (100 * ota.nextIndex) / ota.chunkCount;
     String bar;
@@ -641,6 +689,12 @@ void installUpdate() {
   prefs.putUInt("pending_code", ota.versionCode);
   prefs.putBool("rollback", ota.isRollback);
   prefs.putString("prev_version", currentVersion);
+
+  ota.chunkHashes.clear();
+  ota.chunkHashes.shrink_to_fit();
+  free(chunkBuf);
+  chunkBuf = nullptr;
+  chunkBufLen = 0;
 
   publishResult(true, ota.isRollback ? Reason::ROLLED_BACK_MANUAL : Reason::SUCCESS);
   delay(600);  // let the publish leave before the radio dies
