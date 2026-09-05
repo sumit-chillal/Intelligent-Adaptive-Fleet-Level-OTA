@@ -50,9 +50,25 @@
 // anything claiming to be the broker, which discards the confidentiality half
 // of the design for the sake of three lines of setup.
 //
-// Fetch the exact chain your cluster presents:
-//   openssl s_client -showcerts -connect YOUR_HOST:8883 </dev/null
-// and paste the LAST certificate in the output (the root) below.
+// Generate this block with the helper, which verifies the certificate is
+// genuinely a self-signed root and is currently valid before printing it:
+//
+//   python tools/broker_ca.py
+//
+// Paste its output over this entire definition, including both delimiters.
+// Hand-copying went wrong three separate ways -- an intermediate mistaken for
+// a root, an empty clipboard, and a truncated paste -- and each produced the
+// same bare TLS error with nothing pointing at the certificate.
+//
+// ---------------------------------------------------------------------------
+// DIAGNOSTIC ESCAPE HATCH
+// Uncommenting the line below disables certificate validation entirely, which
+// answers "is my CA wrong?" in one upload. The board then trusts ANY
+// certificate, so remove it the moment you have your answer. The firmware
+// prints a loud banner and shows a warning on the OLED while it is active, so
+// it cannot be left on unnoticed.
+//
+// #define ALLOW_INSECURE_TLS
 static const char* BROKER_ROOT_CA = R"EOF(
 -----BEGIN CERTIFICATE-----
 PASTE THE ROOT CERTIFICATE HERE

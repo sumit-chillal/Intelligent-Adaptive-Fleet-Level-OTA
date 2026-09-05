@@ -785,7 +785,30 @@ void syncClock() {
 }
 
 void connectMqtt() {
+#ifdef ALLOW_INSECURE_TLS
+  // DIAGNOSTIC ONLY. Accepts ANY certificate, which means the board will
+  // happily talk to anyone impersonating the broker. It exists solely to
+  // answer the question "is my CA wrong?" in one upload, and must never be
+  // left enabled: it disables the check that the rest of this design spends an
+  // Ed25519 signature defending.
+  //
+  // It is behind a #define rather than a commented-out line because a comment
+  // is easy to leave in place by accident, and this failure mode is silent --
+  // everything works, and nothing tells you the connection is unauthenticated.
+  netClient.setInsecure();
+  Serial.println();
+  Serial.println("****************************************************");
+  Serial.println("** WARNING: ALLOW_INSECURE_TLS is enabled.        **");
+  Serial.println("** Certificate validation is OFF. Diagnostic use  **");
+  Serial.println("** only -- remove the #define in config.h before  **");
+  Serial.println("** any demonstration or measurement.              **");
+  Serial.println("****************************************************");
+  Serial.println();
+  screen("!! INSECURE TLS !!", "cert check OFF", "diagnostic only");
+  delay(1500);
+#else
   netClient.setCACert(BROKER_ROOT_CA);
+#endif
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMessage);
   // Two different large payloads have to fit in this buffer.
