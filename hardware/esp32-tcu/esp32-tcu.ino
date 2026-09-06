@@ -25,6 +25,7 @@
 #include <SHA256.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <esp_system.h>
 #include <mbedtls/base64.h>
 #include <Adafruit_SSD1306.h>
@@ -120,6 +121,15 @@ String pendingAutoRollbackReport = "";
 String bootBanner = "";
 String bootDetail = "";
 bool revertedOnBoot = false;
+
+// A freshly installed image is on probation until it proves it can reach the
+// broker. 90 seconds is generous for a slow hotspot and still short enough
+// that a demonstration does not stall.
+static const int PROBATION_SECONDS = 90;
+bool onProbation = false;
+unsigned long probationStarted = 0;
+
+void revertToPrevious();
 
 // ===========================================================================
 // LEDs — one meaning per colour, never two lit at once.
@@ -742,7 +752,11 @@ void installUpdate() {
   // running partition's address is the unambiguous answer to "did the update
   // take", and it needs something to be compared against.
   const esp_partition_t* target = esp_ota_get_next_update_partition(NULL);
+  const esp_partition_t* current = esp_ota_get_running_partition();
   prefs.putUInt("pending_addr", target ? target->address : 0);
+  // Where to go back to if the new image cannot prove itself. Recorded now,
+  // while the running partition is still the old one.
+  prefs.putUInt("prev_addr", current ? current->address : 0);
   prefs.putString("pending", ota.version);
   prefs.putString("pending_campaign", ota.campaignId);
   prefs.putUInt("pending_code", ota.versionCode);
@@ -780,7 +794,66 @@ void installUpdate() {
  * bytes are exactly what the server sent, which simply does not run on this
  * device.
  */
+/**
+ * Put the previous image back and restart.
+ *
+ * Called when a newly installed image has not reached the broker within the
+ * probation window. The old partition was never erased, so this is a matter of
+ * pointing the bootloader back at it -- the whole reason A/B exists.
+ */
+void revertToPrevious() {
+  uint32_t prevAddr = prefs.getUInt("prev_addr", 0);
+  const esp_partition_t* prev = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, NULL);
+
+  // Walk the app partitions for the one we came from.
+  esp_partition_iterator_t it = esp_partition_find(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, NULL);
+  const esp_partition_t* target = nullptr;
+  while (it != NULL) {
+    const esp_partition_t* part = esp_partition_get(it);
+    if (part->address == prevAddr) { target = part; break; }
+    it = esp_partition_next(it);
+  }
+  if (it) esp_partition_iterator_release(it);
+
+  if (target == nullptr) {
+    Serial.println("cannot revert: previous partition not found");
+    prefs.remove("pending");
+    onProbation = false;
+    return;
+  }
+
+  Serial.printf("PROBATION FAILED — reverting to the previous image at "
+                "0x%08x\n", (unsigned)prevAddr);
+  screenState("REVERTING", "v" + currentVersion + " unreachable",
+              "restoring previous");
+  setLed(LED_REVERTED);
+  delay(2500);
+
+  // Mark what happened BEFORE the restart, so the restored image can report it.
+  prefs.putBool("was_reverted", true);
+  prefs.putString("version", prefs.getString("prev_version", "unknown"));
+  prefs.remove("pending");
+  prefs.remove("pending_addr");
+
+  esp_ota_set_boot_partition(target);
+  delay(200);
+  ESP.restart();
+}
+
 void confirmBootIfPending() {
+  // A restored image announces the revert once, on its first boot back.
+  if (prefs.getBool("was_reverted", false)) {
+    prefs.putBool("was_reverted", false);
+    revertedOnBoot = true;
+    bootBanner = "REVERTED";
+    bootDetail = "bad image rejected";
+    pendingAutoRollbackReport = prefs.getString("pending_campaign", "");
+    Serial.printf("ROLLED BACK automatically — running v%s again\n",
+                  currentVersion.c_str());
+  }
+
   const esp_partition_t* running = esp_ota_get_running_partition();
   String pending = prefs.getString("pending", "");
   uint32_t expectedAddr = prefs.getUInt("pending_addr", 0);
@@ -804,13 +877,27 @@ void confirmBootIfPending() {
   // the one the update was written to, the update took. If it is the other
   // one, the bootloader really did revert.
   if (running->address == expectedAddr) {
+    // The new image is executing. That is necessary but NOT sufficient: an
+    // image can boot and still be useless, and the useful definition of a
+    // working TCU is one that can reach the fleet server.
+    //
+    // So the image enters PROBATION here rather than being declared good. It
+    // is confirmed only once the broker connection succeeds. If that does not
+    // happen within the deadline, revertToPrevious() puts the old image back.
+    //
+    // This is application-level self-healing, not the bootloader's rollback.
+    // ESP-IDF can revert an image that fails to boot at all, but only when the
+    // bootloader is built with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, which
+    // the stock Arduino core does not enable. Rather than claim a capability
+    // the platform does not provide, this covers the failure that IS reachable
+    // from here: firmware that runs but cannot do its job.
+    onProbation = true;
+    probationStarted = millis();
     currentVersion = pending;
     activeSlot = (running->address == 0x10000) ? "A" : "B";
     prefs.putString("version", currentVersion);
     prefs.putString("slot", activeSlot);
     prefs.putUInt("minver", prefs.getUInt("pending_code", 0));
-    prefs.remove("pending");
-    prefs.remove("pending_addr");
 
     // Cancel the pending-verify state if the bootloader is using one. Harmless
     // when it is not, and essential when it is: without it the next reboot
@@ -821,11 +908,12 @@ void confirmBootIfPending() {
       esp_ota_mark_app_valid_cancel_rollback();
     }
 
-    Serial.printf("new image CONFIRMED: v%s running from %s at 0x%08x\n",
+    Serial.printf("new image RUNNING: v%s from %s at 0x%08x — on probation, "
+                  "must reach the broker within %d s\n",
                   currentVersion.c_str(), running->label,
-                  (unsigned)running->address);
-    bootBanner = "CONFIRMED";
-    bootDetail = "v" + currentVersion + " from " + String(running->label);
+                  (unsigned)running->address, PROBATION_SECONDS);
+    bootBanner = "PROBATION";
+    bootDetail = "v" + currentVersion + " must reach server";
   } else {
     // Running from a different partition than the one we wrote. The bootloader
     // rejected the new image and fell back.
@@ -1010,6 +1098,24 @@ void connectMqtt() {
       publishHello("connect");
       setLed(LED_IDLE);
 
+      if (onProbation) {
+        // Reaching the broker is the pass condition. Only now is the image
+        // recorded as good and the fallback discarded.
+        onProbation = false;
+        prefs.remove("pending");
+        prefs.remove("pending_addr");
+        esp_ota_img_states_t st;
+        const esp_partition_t* run = esp_ota_get_running_partition();
+        if (esp_ota_get_state_partition(run, &st) == ESP_OK &&
+            st == ESP_OTA_IMG_PENDING_VERIFY) {
+          esp_ota_mark_app_valid_cancel_rollback();
+        }
+        Serial.printf("PROBATION PASSED — v%s confirmed\n",
+                      currentVersion.c_str());
+        screenState("CONFIRMED", "v" + currentVersion, "reached the server");
+        delay(2000);
+      }
+
       if (pendingAutoRollbackReport.length()) {
         JsonDocument doc;
         addEnvelope(doc, "convoy.result.v1");
@@ -1132,6 +1238,10 @@ void loop() {
   }
   mqtt.loop();
   serviceLed();
+
+  if (onProbation && millis() - probationStarted > PROBATION_SECONDS * 1000UL) {
+    revertToPrevious();
+  }
 
   if (millis() - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = millis();
