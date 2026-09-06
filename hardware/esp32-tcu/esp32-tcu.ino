@@ -947,6 +947,13 @@ void connectWifi() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(400);
     Serial.print(".");
+    // Same reasoning as the broker loop: an image whose WiFi settings are
+    // wrong would otherwise spin here forever, past its own deadline.
+    if (onProbation &&
+        millis() - probationStarted > PROBATION_SECONDS * 1000UL) {
+      Serial.println();
+      revertToPrevious();
+    }
   }
   Serial.printf("\nWiFi connected, ip=%s rssi=%d\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
@@ -1133,6 +1140,22 @@ void connectMqtt() {
       }
     } else {
       int st = mqtt.state();
+      // The probation deadline has to be checked HERE, not only in loop().
+      //
+      // connectMqtt() spins on `while (!mqtt.connected())` and does not return
+      // until it succeeds, so an image that can never reach the broker never
+      // reaches loop() either -- and the deadline that was supposed to rescue
+      // it is in loop(). The first version of this reverted nothing and
+      // retried a dead host indefinitely.
+      //
+      // A recovery path that only runs when the system is healthy enough to
+      // get back to the main loop is not a recovery path.
+      if (onProbation &&
+          millis() - probationStarted > PROBATION_SECONDS * 1000UL) {
+        revertToPrevious();
+        return;   // unreachable: revertToPrevious restarts the board
+      }
+
       Serial.printf("broker refused, state=%d — retrying in 3s\n", st);
       if (st == -2) {
         // -2 is a TLS/connection failure, which has three usual causes and no
@@ -1147,7 +1170,14 @@ void connectMqtt() {
       }
       // -2 is a TLS/connection failure (check the CA and the host);
       //  4 is bad credentials; 5 is not authorised.
-      screen("CONVOY", "broker refused", "state " + String(st));
+      if (onProbation) {
+        long left = PROBATION_SECONDS -
+                    (long)((millis() - probationStarted) / 1000);
+        screenState("PROBATION", "v" + currentVersion + " unproven",
+                    "revert in " + String(left > 0 ? left : 0) + "s");
+      } else {
+        screen("CONVOY", "broker refused", "state " + String(st));
+      }
       setLed(LED_FAULT);
       delay(3000);
     }
