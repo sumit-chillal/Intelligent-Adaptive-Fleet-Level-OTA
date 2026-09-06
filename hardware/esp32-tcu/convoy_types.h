@@ -25,7 +25,11 @@
 
 // ------------------------------------------------------------------- LEDs --
 // One meaning per colour, never two lit at once.
-enum LedState { LED_IDLE, LED_BUSY, LED_FAULT, LED_OFF };
+// LED_REVERTED blinks rather than holding steady. With three colours and four
+// meanings, one has to be distinguishable some other way -- and a blink is the
+// right one to spend it on, because an automatic revert is the state an
+// observer is least likely to be expecting and most needs to notice.
+enum LedState { LED_IDLE, LED_BUSY, LED_FAULT, LED_REVERTED, LED_OFF };
 
 // -------------------------------------------------------------- OTA state --
 // One in-flight update. `active` guards every chunk handler: a chunk arriving

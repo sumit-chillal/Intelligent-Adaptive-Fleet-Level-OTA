@@ -115,14 +115,55 @@ void publishResult(bool success, const char* reason, const String& detail = "",
 // If the bootloader reverted a bad image, the campaign id is stashed here in
 // setup() and reported once the broker connection is up.
 String pendingAutoRollbackReport = "";
+// What to show on the OLED for the first few seconds after boot, so an
+// automatic revert is visible on the board itself and not only in a log.
+String bootBanner = "";
+String bootDetail = "";
+bool revertedOnBoot = false;
 
 // ===========================================================================
 // LEDs — one meaning per colour, never two lit at once.
 // ===========================================================================
+LedState ledState = LED_OFF;
+
 void setLed(LedState s) {
+  ledState = s;
   digitalWrite(PIN_LED_GREEN, s == LED_IDLE);
   digitalWrite(PIN_LED_BLUE, s == LED_BUSY);
   digitalWrite(PIN_LED_RED, s == LED_FAULT);
+}
+
+/** Called from loop(). Only LED_REVERTED animates; everything else holds. */
+void serviceLed() {
+  if (ledState != LED_REVERTED) return;
+  bool on = (millis() / 400) % 2;
+  digitalWrite(PIN_LED_RED, on);
+  digitalWrite(PIN_LED_GREEN, !on);
+  digitalWrite(PIN_LED_BLUE, LOW);
+}
+
+/**
+ * The state word, set large.
+ *
+ * Same vocabulary as the dashboard: a person reading the board from 30 cm and
+ * a person reading the projector from ten feet see the same word for the same
+ * event. A separate set of labels for the device would mean translating
+ * between them mid-demonstration.
+ */
+void screenState(const String& word, const String& line2 = "",
+                 const String& line3 = "") {
+  if (!displayReady) return;
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.println(word);
+  display.setTextSize(1);
+  if (line2.length()) { display.setCursor(0, 24); display.println(line2); }
+  if (line3.length()) { display.setCursor(0, 38); display.println(line3); }
+  display.setCursor(0, 54);
+  display.print(DEVICE_ID);
+  display.display();
 }
 
 // ===========================================================================
@@ -341,7 +382,7 @@ void failUpdate(const char* reason, const String& detail, int chunkIndex = -1);
 void failUpdate(const char* reason, const String& detail, int chunkIndex) {
   Serial.printf("UPDATE FAILED %s — %s\n", reason, detail.c_str());
   setLed(LED_FAULT);
-  screenBanner("UPDATE ABORTED", detail);
+  screenState("FAILED", reason, detail.substring(0, 21));
 
   // Abandon the partially written slot. The RUNNING partition was never
   // touched, which is the entire reason A/B exists: a failure here costs a
@@ -492,7 +533,7 @@ void handleOffer(const uint8_t* payload, size_t len) {
                     String(minBattery) + "%";
     Serial.printf("offer REJECTED: %s\n", detail.c_str());
     setLed(LED_FAULT);
-    screenBanner("UPDATE ABORTED", detail);
+    screenState("FAILED", reason, detail.substring(0, 21));
 
     JsonDocument ack;
     addEnvelope(ack, "convoy.ack.v1");
@@ -551,8 +592,9 @@ void handleOffer(const uint8_t* payload, size_t len) {
                 ota.version.c_str(), ota.chunkCount, ota.sizeBytes,
                 rollback ? " (ROLLBACK)" : "");
   setLed(LED_BUSY);
-  screen(String(DEVICE_ID), "v" + currentVersion + " -> v" + ota.version,
-         rollback ? "ROLLBACK" : "downloading", "0/" + String(ota.chunkCount));
+  screenState(rollback ? "ROLLBACK" : "OFFER OK",
+              "v" + currentVersion + " -> v" + ota.version,
+              String(ota.chunkCount) + " chunks verified");
 
   JsonDocument ack;
   addEnvelope(ack, "convoy.ack.v1");
@@ -643,11 +685,34 @@ void handleChunk(const uint8_t* payload, size_t len) {
   }
   if (index % 4 == 0 || ota.nextIndex == ota.chunkCount) {
     int pct = (100 * ota.nextIndex) / ota.chunkCount;
-    String bar;
-    for (int i = 0; i < 16; i++) bar += (i < pct * 16 / 100) ? '#' : '.';
-    screen(String(DEVICE_ID), "v" + ota.version,
-           bar + " " + String(pct) + "%",
-           "CHUNK " + String(ota.nextIndex) + "/" + String(ota.chunkCount));
+    if (displayReady) {
+      display.clearDisplay();
+      display.setTextColor(SSD1306_WHITE);
+      display.setTextSize(1);
+      display.setCursor(0, 0);
+      display.println("DOWNLOADING");
+      display.setCursor(0, 12);
+      display.print("v");
+      display.print(currentVersion);
+      display.print(" -> v");
+      display.println(ota.version);
+
+      // Drawn rather than spelled out in characters: a filling bar is
+      // readable from across a room, where "CHUNK 88/135" is not.
+      display.drawRect(0, 28, 128, 12, SSD1306_WHITE);
+      display.fillRect(2, 30, (124 * pct) / 100, 8, SSD1306_WHITE);
+
+      display.setCursor(0, 44);
+      display.print(ota.nextIndex);
+      display.print("/");
+      display.print(ota.chunkCount);
+      display.print("  ");
+      display.print(pct);
+      display.println("%");
+      display.setCursor(0, 56);
+      display.print(DEVICE_ID);
+      display.display();
+    }
   }
 
   if (ota.nextIndex >= ota.chunkCount) installUpdate();
@@ -669,7 +734,7 @@ void installUpdate() {
 
   Serial.printf("INSTALLED v%s (%u bytes) — rebooting to confirm\n",
                 ota.version.c_str(), ota.sizeBytes);
-  screen(String(DEVICE_ID), "v" + ota.version, "INSTALLED", "rebooting...");
+  screenState("INSTALLED", "v" + ota.version, "rebooting to confirm");
 
   // Recorded BEFORE the reboot. The new image reads these on boot to know what
   // it is confirming, and to know what to report if it fails to.
@@ -759,6 +824,8 @@ void confirmBootIfPending() {
     Serial.printf("new image CONFIRMED: v%s running from %s at 0x%08x\n",
                   currentVersion.c_str(), running->label,
                   (unsigned)running->address);
+    bootBanner = "CONFIRMED";
+    bootDetail = "v" + currentVersion + " from " + String(running->label);
   } else {
     // Running from a different partition than the one we wrote. The bootloader
     // rejected the new image and fell back.
@@ -770,6 +837,9 @@ void confirmBootIfPending() {
     prefs.remove("pending");
     prefs.remove("pending_addr");
     pendingAutoRollbackReport = prefs.getString("pending_campaign", "");
+    bootBanner = "REVERTED";
+    bootDetail = "bad image; back on v" + reverted;
+    revertedOnBoot = true;
   }
 }
 
@@ -1039,7 +1109,13 @@ void setup() {
   T_OTA_PROGRESS = root + "/d/" + id + "/ota/progress";
   T_OTA_RESULT = root + "/d/" + id + "/ota/result";
 
-  screen("CONVOY", String(DEVICE_ID), "v" + currentVersion, "booting");
+  if (bootBanner.length()) {
+    screenState(bootBanner, bootDetail, "");
+    setLed(revertedOnBoot ? LED_REVERTED : LED_IDLE);
+    delay(4000);   // long enough to read and photograph
+  } else {
+    screen("CONVOY", String(DEVICE_ID), "v" + currentVersion, "booting");
+  }
   connectWifi();
   connectMqtt();
 }
@@ -1055,15 +1131,19 @@ void loop() {
     connectMqtt();
   }
   mqtt.loop();
+  serviceLed();
 
   if (millis() - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = millis();
     publishHealth();
 
-    String batt = String(BATTERY_PERCENT) + "%";
-    screen(String(DEVICE_ID),
-           "v" + currentVersion,
-           "batt " + batt + "  net " + String(NETWORK_QUALITY),
-           "ONLINE  slot " + activeSlot);
+    if (revertedOnBoot) {
+      screenState("REVERTED", "running v" + currentVersion,
+                  "last update rejected");
+    } else {
+      screenState("ONLINE", "v" + currentVersion + "  slot " + activeSlot,
+                  "batt " + String(BATTERY_PERCENT) + "%  net " +
+                  String(NETWORK_QUALITY));
+    }
   }
 }
