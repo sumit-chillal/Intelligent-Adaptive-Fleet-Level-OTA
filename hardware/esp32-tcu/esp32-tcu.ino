@@ -52,6 +52,33 @@
 // 16 KB costs 8 KB of RAM out of 320 KB and removes the entire failure mode.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
+// ---------------------------------------------------------------------------
+// Types and file-scope state, declared BEFORE anything that mentions them.
+//
+// Arduino generates prototypes for every function in the .ino and inserts them
+// near the top of the file. If a type appears in a signature but is declared
+// further down, the generated prototype references a type that does not exist
+// yet and the compile fails on a line nobody wrote. The same applies to file
+// scope variables used by functions defined above them.
+//
+// Declaring both here, before any function, removes the ordering constraint
+// entirely rather than relying on where the IDE happens to place things.
+// ---------------------------------------------------------------------------
+
+enum LedState { LED_IDLE, LED_BUSY, LED_FAULT, LED_OFF };
+
+// One decode buffer for the whole download, allocated when the offer is
+// accepted and freed when it ends.
+//
+// An earlier version allocated an 11 KB vector inside the chunk handler for
+// every chunk, on top of a String copy and a substring copy of the same
+// message. Roughly 44 KB of allocate-and-free per chunk left the heap too
+// fragmented to find a contiguous block after about nine chunks, which is
+// exactly where the download stopped. Free memory was never short; CONTIGUOUS
+// free memory was.
+static uint8_t* chunkBuf = nullptr;
+static size_t chunkBufLen = 0;
+
 // --------------------------------------------------------------- display ---
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -130,8 +157,6 @@ const char* ROLLED_BACK_MANUAL = "ROLLED_BACK_MANUAL";
 // ===========================================================================
 // LEDs — one meaning per colour, never two lit at once.
 // ===========================================================================
-enum LedState { LED_IDLE, LED_BUSY, LED_FAULT, LED_OFF };
-
 void setLed(LedState s) {
   digitalWrite(PIN_LED_GREEN, s == LED_IDLE);
   digitalWrite(PIN_LED_BLUE, s == LED_BUSY);
@@ -579,18 +604,6 @@ void handleOffer(const uint8_t* payload, size_t len) {
 }
 
 /** A chunk: decode, hash-check the plaintext, write it to the inactive slot. */
-// One decode buffer for the whole download, allocated when the offer is
-// accepted and freed when it ends.
-//
-// The previous version allocated an 11 KB vector inside the handler for every
-// chunk, on top of a String copy and a substring copy of the same message.
-// Roughly 44 KB of allocate-and-free per chunk left the heap too fragmented to
-// find a contiguous block after about nine chunks -- which is precisely where
-// the download stopped. Free memory was never the problem; contiguous free
-// memory was.
-static uint8_t* chunkBuf = nullptr;
-static size_t chunkBufLen = 0;
-
 void handleChunk(const uint8_t* payload, size_t len) {
   if (!ota.active) return;
 
