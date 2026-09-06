@@ -38,6 +38,7 @@
 #include <time.h>
 
 #include "config.h"
+#include "convoy_types.h"
 
 // The Arduino loop task gets 8 KB of stack by default, and every OTA chunk is
 // processed inside the MQTT callback -- which already has the TLS stack
@@ -64,8 +65,6 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 // Declaring both here, before any function, removes the ordering constraint
 // entirely rather than relying on where the IDE happens to place things.
 // ---------------------------------------------------------------------------
-
-enum LedState { LED_IDLE, LED_BUSY, LED_FAULT, LED_OFF };
 
 // One decode buffer for the whole download, allocated when the offer is
 // accepted and freed when it ends.
@@ -101,29 +100,6 @@ String T_HELLO, T_HEALTH, T_STATUS, T_PONG, T_CMD, T_CMD_ALL;
 String T_OTA_OFFER, T_OTA_CHUNK, T_OTA_ACK, T_OTA_PROGRESS, T_OTA_RESULT;
 
 // ---------------------------------------------------------------- OTA state --
-// One in-flight update. `active` guards every chunk handler: a chunk arriving
-// outside an accepted offer is a stray from a cancelled campaign and must be
-// dropped rather than written to flash.
-struct OtaSession {
-  bool active = false;
-  String campaignId;
-  String firmwareId;
-  String version;
-  uint32_t versionCode = 0;
-  uint32_t chunkCount = 0;
-  uint32_t chunkSize = 0;
-  uint32_t sizeBytes = 0;
-  uint32_t nextIndex = 0;
-  bool isRollback = false;
-  // SHA-256 of each chunk, stored as RAW BYTES rather than hex Strings.
-  //
-  // 128 Arduino Strings of 64 characters cost roughly 10 KB once per-object
-  // overhead is counted, and each one is a separate heap allocation that
-  // fragments the space the chunk buffers need. 128 x 32 raw bytes is 4 KB in
-  // a single contiguous block.
-  std::vector<uint8_t> chunkHashes;   // chunkCount * 32 bytes
-  String wholeSha256;
-};
 OtaSession ota;
 
 // Forward declarations. Arduino generates prototypes for functions in the
@@ -139,20 +115,6 @@ void publishResult(bool success, const char* reason, const String& detail = "",
 // If the bootloader reverted a bad image, the campaign id is stashed here in
 // setup() and reported once the broker connection is up.
 String pendingAutoRollbackReport = "";
-
-// Reason codes. The same closed vocabulary the server and the Python simulator
-// use — a shared taxonomy is what lets one query explain an outcome regardless
-// of which kind of device produced it.
-namespace Reason {
-const char* SUCCESS = "SUCCESS";
-const char* LOW_BATTERY = "FAILED_LOW_BATTERY";
-const char* CHUNK_HASH = "FAILED_CHUNK_HASH_MISMATCH";
-const char* IMAGE_HASH = "FAILED_IMAGE_HASH_MISMATCH";
-const char* SIG_INVALID = "FAILED_SIGNATURE_INVALID";
-const char* ANTI_ROLLBACK = "FAILED_ANTI_ROLLBACK";
-const char* FLASH_WRITE = "FAILED_FLASH_WRITE";
-const char* ROLLED_BACK_MANUAL = "ROLLED_BACK_MANUAL";
-}  // namespace Reason
 
 // ===========================================================================
 // LEDs — one meaning per colour, never two lit at once.
@@ -321,7 +283,6 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
     Serial.printf("unhandled cmd=%s (OTA commands arrive in stage 2)\n", cmd);
   }
 }
-
 
 // ===========================================================================
 // OTA
