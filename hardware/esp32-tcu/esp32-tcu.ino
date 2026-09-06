@@ -465,7 +465,7 @@ void handleOffer(const uint8_t* payload, size_t len) {
     // a signature the board accepts.
     Serial.println("offer REJECTED: FAILED_SIGNATURE_INVALID");
     setLed(LED_FAULT);
-    screenBanner("REJECTED", "bad signature");
+    screenState("REFUSED", "bad signature", "not from our server");
 
     JsonDocument ack;
     addEnvelope(ack, "convoy.ack.v1");
@@ -533,7 +533,7 @@ void handleOffer(const uint8_t* payload, size_t len) {
                     String(minBattery) + "%";
     Serial.printf("offer REJECTED: %s\n", detail.c_str());
     setLed(LED_FAULT);
-    screenState("FAILED", reason, detail.substring(0, 21));
+    screenState("REFUSED", Reason::LOW_BATTERY, detail.substring(0, 21));
 
     JsonDocument ack;
     addEnvelope(ack, "convoy.ack.v1");
