@@ -25,6 +25,7 @@
 #include <SHA256.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_system.h>
 #include <mbedtls/base64.h>
 #include <Adafruit_SSD1306.h>
 #include <ArduinoJson.h>
@@ -37,6 +38,19 @@
 #include <time.h>
 
 #include "config.h"
+
+// The Arduino loop task gets 8 KB of stack by default, and every OTA chunk is
+// processed inside the MQTT callback -- which already has the TLS stack
+// beneath it, and then adds JSON parsing, base64 decoding, SHA-256 and a flash
+// write on top.
+//
+// A stack overflow on ESP32 does not fail gracefully. It corrupts whatever sits
+// below the stack and the board panics and reboots, which from the server looks
+// exactly like a device that went offline mid-download: the last will fires,
+// the campaign times out, and nothing anywhere says "stack".
+//
+// 16 KB costs 8 KB of RAM out of 320 KB and removes the entire failure mode.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 // --------------------------------------------------------------- display ---
 #define SCREEN_WIDTH 128
@@ -649,8 +663,9 @@ void handleChunk(const uint8_t* payload, size_t len) {
   // Refresh the display every few chunks. Redrawing on every chunk would spend
   // more time on I2C than on the download.
   if (index % 8 == 0 || ota.nextIndex == ota.chunkCount) {
-    Serial.printf("chunk %u/%u  heap %u\n", ota.nextIndex, ota.chunkCount,
-                  ESP.getFreeHeap());
+    Serial.printf("chunk %u/%u  heap %u  stack free %u\n",
+                  ota.nextIndex, ota.chunkCount, ESP.getFreeHeap(),
+                  uxTaskGetStackHighWaterMark(NULL));
   }
   if (index % 4 == 0 || ota.nextIndex == ota.chunkCount) {
     int pct = (100 * ota.nextIndex) / ota.chunkCount;
@@ -684,11 +699,22 @@ void installUpdate() {
 
   // Recorded BEFORE the reboot. The new image reads these on boot to know what
   // it is confirming, and to know what to report if it fails to.
+  // Record WHERE the image went, not just what it was. On the next boot the
+  // running partition's address is the unambiguous answer to "did the update
+  // take", and it needs something to be compared against.
+  const esp_partition_t* target = esp_ota_get_next_update_partition(NULL);
+  prefs.putUInt("pending_addr", target ? target->address : 0);
   prefs.putString("pending", ota.version);
   prefs.putString("pending_campaign", ota.campaignId);
   prefs.putUInt("pending_code", ota.versionCode);
   prefs.putBool("rollback", ota.isRollback);
   prefs.putString("prev_version", currentVersion);
+  // Record WHICH partition the new image was written to. On the next boot,
+  // comparing the running partition against this is what distinguishes "the
+  // new image booted" from "the bootloader reverted" -- see
+  // confirmBootIfPending for why the image-state flag cannot be used.
+  const esp_partition_t* next = esp_ota_get_next_update_partition(NULL);
+  prefs.putUInt("pending_addr", next ? next->address : 0);
 
   ota.chunkHashes.clear();
   ota.chunkHashes.shrink_to_fit();
@@ -717,30 +743,58 @@ void installUpdate() {
  */
 void confirmBootIfPending() {
   const esp_partition_t* running = esp_ota_get_running_partition();
-  esp_ota_img_states_t state;
-  if (esp_ota_get_state_partition(running, &state) != ESP_OK) return;
-
   String pending = prefs.getString("pending", "");
+  uint32_t expectedAddr = prefs.getUInt("pending_addr", 0);
 
-  if (state == ESP_OTA_IMG_PENDING_VERIFY) {
-    if (pending.length()) {
-      currentVersion = pending;
-      activeSlot = (activeSlot == "A") ? "B" : "A";
-      prefs.putString("version", currentVersion);
-      prefs.putString("slot", activeSlot);
-      prefs.putUInt("minver", prefs.getUInt("pending_code", 0));
-      prefs.remove("pending");
-    }
-    esp_ota_mark_app_valid_cancel_rollback();
-    Serial.printf("new image confirmed: v%s slot %s\n",
-                  currentVersion.c_str(), activeSlot.c_str());
-  } else if (pending.length()) {
-    // We are running an image that is already valid while a pending version is
-    // recorded: the bootloader reverted. Report it, because from the server's
-    // side an automatic rollback is otherwise indistinguishable from silence.
-    String reverted = prefs.getString("prev_version", currentVersion);
-    Serial.printf("ROLLED BACK automatically to v%s\n", reverted.c_str());
+  if (!pending.length()) {
+    // Nothing was installed since the last boot. Normal start.
+    return;
+  }
+
+  // Compare PARTITIONS, not image state.
+  //
+  // The first version of this checked for ESP_OTA_IMG_PENDING_VERIFY, on the
+  // assumption that a freshly installed image always boots in that state. It
+  // only does when the bootloader is built with rollback support, which the
+  // stock Arduino core is not -- so a perfectly successful update booted
+  // already-valid, this function concluded the bootloader had reverted, and
+  // the device reported an automatic rollback that never happened while
+  // actually running the new firmware.
+  //
+  // Which partition is executing is not a matter of interpretation. If it is
+  // the one the update was written to, the update took. If it is the other
+  // one, the bootloader really did revert.
+  if (running->address == expectedAddr) {
+    currentVersion = pending;
+    activeSlot = (running->address == 0x10000) ? "A" : "B";
+    prefs.putString("version", currentVersion);
+    prefs.putString("slot", activeSlot);
+    prefs.putUInt("minver", prefs.getUInt("pending_code", 0));
     prefs.remove("pending");
+    prefs.remove("pending_addr");
+
+    // Cancel the pending-verify state if the bootloader is using one. Harmless
+    // when it is not, and essential when it is: without it the next reboot
+    // reverts a working image.
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+      esp_ota_mark_app_valid_cancel_rollback();
+    }
+
+    Serial.printf("new image CONFIRMED: v%s running from %s at 0x%08x\n",
+                  currentVersion.c_str(), running->label,
+                  (unsigned)running->address);
+  } else {
+    // Running from a different partition than the one we wrote. The bootloader
+    // rejected the new image and fell back.
+    String reverted = prefs.getString("prev_version", currentVersion);
+    Serial.printf("ROLLED BACK automatically to v%s "
+                  "(expected 0x%08x, running 0x%08x from %s)\n",
+                  reverted.c_str(), (unsigned)expectedAddr,
+                  (unsigned)running->address, running->label);
+    prefs.remove("pending");
+    prefs.remove("pending_addr");
     pendingAutoRollbackReport = prefs.getString("pending_campaign", "");
   }
 }
@@ -979,6 +1033,23 @@ void setup() {
   Serial.printf("\n=== CONVOY %s === v%s slot %s\n",
                 DEVICE_ID, currentVersion.c_str(), activeSlot.c_str());
   Serial.printf("free heap at boot: %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("loop task stack:   %u bytes free\n",
+                uxTaskGetStackHighWaterMark(NULL));
+
+  // If the last boot was a panic rather than a normal restart, say so. An
+  // unexplained reboot in the middle of a download is otherwise invisible from
+  // this end, and indistinguishable from a network drop at the other.
+  esp_reset_reason_t reason = esp_reset_reason();
+  if (reason == ESP_RST_PANIC) {
+    Serial.println("!! previous boot ended in a PANIC (stack overflow or "
+                   "invalid memory access) !!");
+  } else if (reason == ESP_RST_BROWNOUT) {
+    Serial.println("!! previous boot ended in a BROWNOUT — the supply voltage "
+                   "dipped. Use a better cable or a powered hub. !!");
+  } else if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT) {
+    Serial.println("!! previous boot ended in a WATCHDOG reset — something "
+                   "blocked for too long !!");
+  }
 
   String root = MQTT_TOPIC_ROOT;
   String id = DEVICE_ID;
