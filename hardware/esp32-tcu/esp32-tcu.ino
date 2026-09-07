@@ -84,6 +84,7 @@ static size_t chunkBufLen = 0;
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 bool displayReady = false;
+uint8_t oledAddr = 0;   // filled in by the I2C scan at boot
 
 // ------------------------------------------------------------------ mqtt ---
 WiFiClientSecure netClient;
@@ -1196,12 +1197,61 @@ void setup() {
   setLed(LED_OFF);
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  // 0x3C is the usual address for a 0.96" SSD1306. A few modules use 0x3D.
-  displayReady = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  if (!displayReady) {
+  // 100 kHz rather than the 400 kHz default. Breadboard jumpers have enough
+  // capacitance to corrupt the faster clock, which shows up as a display full
+  // of noise rather than as an error.
+  Wire.setClock(100000);
+
+  // Scan the bus before assuming an address.
+  //
+  // These modules ship at 0x3C or 0x3D and look identical. Hard-coding one of
+  // them turns a wrong guess into "the display does nothing", with no way to
+  // tell that apart from a wiring fault, a dead module, or a power problem.
+  // Listing what actually responds separates all four in one line.
+  Serial.print("I2C scan:");
+  uint8_t found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf(" 0x%02X", addr);
+      found++;
+      if (addr == 0x3C || addr == 0x3D) oledAddr = addr;
+    }
+  }
+  if (found == 0) {
+    Serial.println(" nothing responded");
+    Serial.println("  -> nothing is on the bus at all. Check: VCC on 3V3 "
+                   "(not VIN), GND connected, SDA on D21, SCK/SCL on D22, "
+                   "and that the jumpers are seated firmly.");
+  } else {
+    Serial.printf("  (%u device(s))\n", found);
+  }
+
+  if (oledAddr) {
+    displayReady = display.begin(SSD1306_SWITCHCAPVCC, oledAddr);
+    Serial.printf("SSD1306 at 0x%02X: %s\n", oledAddr,
+                  displayReady ? "initialised" : "responded but init failed");
+  } else {
     // Not fatal. A device that refuses to do its job because a display is
     // missing has confused its output with its purpose.
-    Serial.println("SSD1306 not found at 0x3C — continuing without display");
+    Serial.println("no SSD1306 found — continuing without a display");
+  }
+
+  if (displayReady) {
+    // Prove the panel works before any application logic runs. If this shows
+    // and later screens do not, the fault is in what is drawn, not the wiring.
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("CONVOY");
+    display.setCursor(0, 16);
+    display.print("OLED OK 0x");
+    display.println(oledAddr, HEX);
+    display.setCursor(0, 32);
+    display.println(DEVICE_ID);
+    display.display();
+    delay(1500);
   }
 
   prefs.begin("convoy", false);
