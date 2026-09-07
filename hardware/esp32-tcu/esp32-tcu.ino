@@ -41,6 +41,21 @@
 #include "config.h"
 #include "convoy_types.h"
 
+// The two controllers share the Adafruit_GFX drawing API, so only the object
+// type, the begin() call and the colour constants differ. Aliasing those three
+// keeps every drawing call in this file identical for both.
+#ifdef OLED_SH1106
+  #include <Adafruit_SH110X.h>
+  #define OLED_CLASS Adafruit_SH1106G
+  #define OLED_WHITE SH110X_WHITE
+  #define OLED_BLACK SH110X_BLACK
+#else
+  #include <Adafruit_SSD1306.h>
+  #define OLED_CLASS Adafruit_SSD1306
+  #define OLED_WHITE SSD1306_WHITE
+  #define OLED_BLACK SSD1306_BLACK
+#endif
+
 // The Arduino loop task gets 8 KB of stack by default, and every OTA chunk is
 // processed inside the MQTT callback -- which already has the TLS stack
 // beneath it, and then adds JSON parsing, base64 decoding, SHA-256 and a flash
@@ -82,7 +97,7 @@ static size_t chunkBufLen = 0;
 // --------------------------------------------------------------- display ---
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+OLED_CLASS display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 bool displayReady = false;
 uint8_t oledAddr = 0;   // filled in by the I2C scan at boot
 
@@ -165,7 +180,7 @@ void screenState(const String& word, const String& line2 = "",
                  const String& line3 = "") {
   if (!displayReady) return;
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(OLED_WHITE);
   display.setTextSize(2);
   display.setCursor(0, 0);
   display.println(word);
@@ -188,7 +203,7 @@ void screen(const String& line1, const String& line2 = "",
   if (!displayReady) return;
   display.clearDisplay();
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(OLED_WHITE);
   display.setCursor(0, 0);
   display.println(line1);
   if (line2.length()) { display.setCursor(0, 16); display.println(line2); }
@@ -200,8 +215,8 @@ void screen(const String& line1, const String& line2 = "",
 void screenBanner(const String& title, const String& detail) {
   if (!displayReady) return;
   display.clearDisplay();
-  display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
-  display.setTextColor(SSD1306_BLACK);
+  display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, OLED_WHITE);
+  display.setTextColor(OLED_BLACK);
   display.setTextSize(1);
   display.setCursor(4, 14);
   display.println(title);
@@ -698,7 +713,7 @@ void handleChunk(const uint8_t* payload, size_t len) {
     int pct = (100 * ota.nextIndex) / ota.chunkCount;
     if (displayReady) {
       display.clearDisplay();
-      display.setTextColor(SSD1306_WHITE);
+      display.setTextColor(OLED_WHITE);
       display.setTextSize(1);
       display.setCursor(0, 0);
       display.println("DOWNLOADING");
@@ -710,8 +725,8 @@ void handleChunk(const uint8_t* payload, size_t len) {
 
       // Drawn rather than spelled out in characters: a filling bar is
       // readable from across a room, where "CHUNK 88/135" is not.
-      display.drawRect(0, 28, 128, 12, SSD1306_WHITE);
-      display.fillRect(2, 30, (124 * pct) / 100, 8, SSD1306_WHITE);
+      display.drawRect(0, 28, 128, 12, OLED_WHITE);
+      display.fillRect(2, 30, (124 * pct) / 100, 8, OLED_WHITE);
 
       display.setCursor(0, 44);
       display.print(ota.nextIndex);
@@ -1228,26 +1243,41 @@ void setup() {
   }
 
   if (oledAddr) {
+#ifdef OLED_SH1106
+    displayReady = display.begin(oledAddr, true);
+    const char* driver = "SH1106";
+#else
     displayReady = display.begin(SSD1306_SWITCHCAPVCC, oledAddr);
-    Serial.printf("SSD1306 at 0x%02X: %s\n", oledAddr,
+    const char* driver = "SSD1306";
+#endif
+    Serial.printf("%s at 0x%02X: %s\n", driver, oledAddr,
                   displayReady ? "initialised" : "responded but init failed");
+    if (displayReady) {
+      Serial.println("  If the screen shows speckle rather than text, the "
+                     "controller is the other one: toggle OLED_SH1106 in "
+                     "config.h.");
+    }
   } else {
     // Not fatal. A device that refuses to do its job because a display is
     // missing has confused its output with its purpose.
-    Serial.println("no SSD1306 found — continuing without a display");
+    Serial.println("no OLED found — continuing without a display");
   }
 
   if (displayReady) {
     // Prove the panel works before any application logic runs. If this shows
     // and later screens do not, the fault is in what is drawn, not the wiring.
     display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
+    display.setTextColor(OLED_WHITE);
     display.setTextSize(1);
     display.setCursor(0, 0);
     display.println("CONVOY");
     display.setCursor(0, 16);
     display.print("OLED OK 0x");
     display.println(oledAddr, HEX);
+#ifdef OLED_SH1106
+    display.setCursor(64, 16);
+    display.println("SH1106");
+#endif
     display.setCursor(0, 32);
     display.println(DEVICE_ID);
     display.display();

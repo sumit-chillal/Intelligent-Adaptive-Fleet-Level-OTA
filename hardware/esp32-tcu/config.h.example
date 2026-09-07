@@ -82,4 +82,21 @@ PASTE THE ROOT CERTIFICATE HERE
 #define PIN_I2C_SDA   21
 #define PIN_I2C_SCL   22
 
+// ------------------------------------------------------------ OLED driver --
+// Two controllers are common on these modules and they are NOT interchangeable
+// despite sharing a footprint, a pinout and an I2C address.
+//
+//   SSD1306 — usually the 0.96" panels, 128 columns
+//   SH1106  — usually the 1.3" panels, 132 columns
+//
+// Driving an SH1106 with the SSD1306 driver does not fail cleanly. The panel
+// initialises, but every row is written two columns off with the extra columns
+// left as noise, so the display fills with speckle that looks like electrical
+// interference rather than a driver mismatch. If your screen shows garbage or
+// stays dark on a 1.3" module, uncomment the line below.
+//
+// Requires the "Adafruit SH110X" library from the Library Manager.
+//
+// #define OLED_SH1106
+
 #define HEARTBEAT_MS  5000
