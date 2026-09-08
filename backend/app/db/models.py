@@ -205,6 +205,22 @@ class Campaign(Base):
     # each campaign records what it actually did.
     encrypted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # The battery threshold sent to the DEVICE, which may differ from the one
+    # the server filters on.
+    #
+    # Two checks exist for a reason. The server's copy of a device's battery is
+    # at least a heartbeat old, so it filters cheaply to avoid transferring a
+    # megabyte to a device that plainly cannot take it. The device then checks
+    # again against its OWN live reading, which is the one that matters,
+    # because its condition can change between the decision to update it and
+    # the arrival of the offer.
+    #
+    # Keeping the thresholds separate makes that two-stage design visible and
+    # testable. With the server threshold low and the device threshold high,
+    # the offer is sent and the DEVICE refuses -- which is both the more
+    # realistic case and the one that can be seen happening on the hardware.
+    device_min_battery: Mapped[int | None] = mapped_column(Integer)
+
     # ---- rollout policy: every knob the adaptive engine reads --------------
     batch_size_initial: Mapped[int] = mapped_column(Integer, default=5)
     batch_size_min: Mapped[int] = mapped_column(Integer, default=1)

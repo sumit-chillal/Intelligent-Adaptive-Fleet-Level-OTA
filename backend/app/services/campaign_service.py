@@ -125,6 +125,7 @@ async def dry_run(session: AsyncSession, *, firmware_id: str,
         # behaviour is unchanged for anyone who does not pass the flag.
         encrypted=(settings.firmware_encryption_enabled
                    if encrypted is None else encrypted),
+        device_min_battery=device_min_battery,
     )
 
     out: list[DryRunEntry] = []
@@ -169,6 +170,7 @@ async def create_campaign(
     max_attempts: int | None = None,
     is_rollback: bool = False,
     encrypted: bool | None = None,
+    device_min_battery: int | None = None,
     created_by: str = "cli",
 ) -> tuple[Campaign, int]:
     """Create a campaign and materialise its targets. Returns (campaign, count)."""

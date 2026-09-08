@@ -364,7 +364,11 @@ class Orchestrator:
 
             manifest = build_manifest(
                 pkg, device_id=device.device_id, campaign_id=campaign.campaign_id,
-                min_battery=campaign.min_battery,
+                # The device checks against ITS OWN reading using this
+                # value, which may be stricter than the server's filter.
+                min_battery=(campaign.device_min_battery
+                             if campaign.device_min_battery is not None
+                             else campaign.min_battery),
                 min_network_quality=campaign.min_network_quality,
                 # Inside the signed structure, so only the real server can
                 # authorise a downgrade. A device that accepted an unsigned

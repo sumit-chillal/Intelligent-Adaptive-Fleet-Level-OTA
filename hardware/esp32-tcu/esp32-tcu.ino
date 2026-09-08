@@ -106,6 +106,31 @@ WiFiClientSecure netClient;
 PubSubClient mqtt(netClient);
 Preferences prefs;
 
+// ---------------------------------------------------------------------------
+// IDENTITY LIVES IN NVS, NOT IN THE FIRMWARE.
+//
+// DEVICE_ID, the WiFi credentials and the battery reading used to be #defines,
+// which meant they were compiled into the image. A fleet rollout ships ONE
+// binary to every board -- so pushing an image built from board 1's config
+// gave board 2 board 1's device id and board 1's hotspot. Two boards then
+// claimed the same MQTT identity and evicted each other, and the display on
+// board 2 read esp32_001.
+//
+// The values in config.h are now FIRST-BOOT DEFAULTS only. On a board with
+// empty NVS they are copied in once; from then on NVS is authoritative, and it
+// survives OTA because an update rewrites an app partition, not the NVS
+// partition.
+//
+// The consequence is that a fleet image carries no identity at all, which is
+// what makes one binary for many devices correct rather than merely convenient.
+// ---------------------------------------------------------------------------
+String deviceId;
+String wifiSsid;
+String wifiPass;
+String fleetTag;
+int batteryPercent = 0;
+int networkQuality = 0;
+
 String currentVersion = INITIAL_VERSION;
 String activeSlot = "A";
 unsigned long lastHeartbeat = 0;
@@ -188,7 +213,7 @@ void screenState(const String& word, const String& line2 = "",
   if (line2.length()) { display.setCursor(0, 24); display.println(line2); }
   if (line3.length()) { display.setCursor(0, 38); display.println(line3); }
   display.setCursor(0, 54);
-  display.print(DEVICE_ID);
+  display.print(deviceId);
   display.display();
 }
 
@@ -243,7 +268,7 @@ String newMsgId() {
 void addEnvelope(JsonDocument& doc, const char* schema) {
   doc["schema"] = schema;
   doc["msg_id"] = newMsgId();
-  doc["device_id"] = DEVICE_ID;
+  doc["device_id"] = deviceId;
   doc["ts"] = (double)millis() / 1000.0;
 }
 
@@ -256,11 +281,11 @@ void publishHello(const char* trigger) {
   doc["device_type"] = "esp32";
   doc["model"] = DEVICE_MODEL;
   doc["hw_rev"] = "A1";
-  doc["fleet_tag"] = FLEET_TAG;
+  doc["fleet_tag"] = fleetTag;
   doc["current_version"] = currentVersion;
   doc["active_slot"] = activeSlot;
-  doc["battery"] = BATTERY_PERCENT;
-  doc["network_quality"] = NETWORK_QUALITY;
+  doc["battery"] = batteryPercent;
+  doc["network_quality"] = networkQuality;
   doc["resume_pending"] = false;
   doc["agent"] = "esp32-tcu/0.1";
   doc["trigger"] = trigger;
@@ -270,15 +295,15 @@ void publishHello(const char* trigger) {
   mqtt.publish(T_HELLO.c_str(), out.c_str());
 
   Serial.printf("[%s] announced v%s battery=%d%% net=%d (trigger=%s)\n",
-                DEVICE_ID, currentVersion.c_str(), BATTERY_PERCENT,
-                NETWORK_QUALITY, trigger);
+                deviceId.c_str(), currentVersion.c_str(), batteryPercent,
+                networkQuality, trigger);
 }
 
 void publishHealth() {
   JsonDocument doc;
   addEnvelope(doc, "convoy.health.v1");
-  doc["battery"] = BATTERY_PERCENT;
-  doc["network_quality"] = NETWORK_QUALITY;
+  doc["battery"] = batteryPercent;
+  doc["network_quality"] = networkQuality;
   doc["uptime_s"] = (millis() - bootMillis) / 1000;
   doc["current_version"] = currentVersion;
   doc["device_type"] = "esp32";
@@ -393,8 +418,8 @@ void publishResult(bool success, const char* reason, const String& detail,
   doc["reason_code"] = reason;
   doc["version"] = success ? ota.version : currentVersion;
   doc["active_slot"] = activeSlot;
-  doc["battery"] = BATTERY_PERCENT;
-  doc["network_quality"] = NETWORK_QUALITY;
+  doc["battery"] = batteryPercent;
+  doc["network_quality"] = networkQuality;
   if (detail.length()) doc["detail"] = detail;
   if (chunkIndex >= 0) doc["chunk_index"] = chunkIndex;
 
@@ -524,7 +549,7 @@ void handleOffer(const uint8_t* payload, size_t len) {
 
   ota.campaignId = campaignId;
 
-  if (forDevice != String(DEVICE_ID)) {
+  if (forDevice != deviceId) {
     // Bound into the signature, so a genuine offer captured off the wire
     // cannot be replayed at a different board.
     Serial.printf("offer REJECTED: addressed to %s\n", forDevice.c_str());
@@ -554,8 +579,8 @@ void handleOffer(const uint8_t* payload, size_t len) {
   }
 
   // ---- local safety gate -------------------------------------------------
-  if (BATTERY_PERCENT < minBattery) {
-    String detail = "BATTERY " + String(BATTERY_PERCENT) + "% < MIN " +
+  if (batteryPercent < minBattery) {
+    String detail = "BATTERY " + String(batteryPercent) + "% < MIN " +
                     String(minBattery) + "%";
     Serial.printf("offer REJECTED: %s\n", detail.c_str());
     setLed(LED_FAULT);
@@ -736,7 +761,7 @@ void handleChunk(const uint8_t* payload, size_t len) {
       display.print(pct);
       display.println("%");
       display.setCursor(0, 56);
-      display.print(DEVICE_ID);
+      display.print(deviceId);
       display.display();
     }
   }
@@ -953,12 +978,12 @@ void confirmBootIfPending() {
 void syncClock();
 
 void connectWifi() {
-  screen("CONVOY", String("connecting"), String(WIFI_SSID));
+  screen("CONVOY", String("connecting"), wifiSsid);
   setLed(LED_BUSY);
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("connecting to WiFi %s", WIFI_SSID);
+  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  Serial.printf("connecting to WiFi %s", wifiSsid.c_str());
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(400);
@@ -1094,7 +1119,7 @@ void connectMqtt() {
   mqtt.setSocketTimeout(30);
 
   while (!mqtt.connected()) {
-    String clientId = String(DEVICE_ID) + "-" + String(esp_random(), HEX);
+    String clientId = deviceId + "-" + String(esp_random(), HEX);
     Serial.printf("connecting to broker %s:%d as %s\n",
                   MQTT_HOST, MQTT_PORT, clientId.c_str());
     screen("CONVOY", "broker...", String(MQTT_HOST).substring(0, 18));
@@ -1104,7 +1129,7 @@ void connectMqtt() {
     // no polling at all.
     JsonDocument will;
     will["schema"] = "convoy.status.v1";
-    will["device_id"] = DEVICE_ID;
+    will["device_id"] = deviceId;
     will["online"] = false;
     will["reason"] = "last_will";
     String willPayload;
@@ -1147,8 +1172,8 @@ void connectMqtt() {
         doc["reason_code"] = "ROLLED_BACK_AUTOMATIC";
         doc["version"] = currentVersion;
         doc["detail"] = "new image did not confirm; bootloader reverted";
-        doc["battery"] = BATTERY_PERCENT;
-        doc["network_quality"] = NETWORK_QUALITY;
+        doc["battery"] = batteryPercent;
+        doc["network_quality"] = networkQuality;
         String out;
         serializeJson(doc, out);
         mqtt.publish(T_OTA_RESULT.c_str(), out.c_str());
@@ -1279,19 +1304,48 @@ void setup() {
     display.println("SH1106");
 #endif
     display.setCursor(0, 32);
-    display.println(DEVICE_ID);
+    display.println(deviceId);
     display.display();
     delay(1500);
   }
 
   prefs.begin("convoy", false);
+
+  // First boot on a blank device: adopt the compiled-in defaults and record
+  // them. Every later boot, including after any OTA, reads them back from NVS
+  // and ignores whatever the image happened to be built with.
+  if (!prefs.isKey("device_id")) {
+    Serial.println("no identity in NVS — provisioning from config.h defaults");
+    prefs.putString("device_id", DEVICE_ID);
+    prefs.putString("wifi_ssid", WIFI_SSID);
+    prefs.putString("wifi_pass", WIFI_PASSWORD);
+    prefs.putString("fleet_tag", FLEET_TAG);
+    prefs.putInt("battery", BATTERY_PERCENT);
+    prefs.putInt("network", NETWORK_QUALITY);
+  }
+
+  deviceId = prefs.getString("device_id", DEVICE_ID);
+  wifiSsid = prefs.getString("wifi_ssid", WIFI_SSID);
+  wifiPass = prefs.getString("wifi_pass", WIFI_PASSWORD);
+  fleetTag = prefs.getString("fleet_tag", FLEET_TAG);
+  batteryPercent = prefs.getInt("battery", BATTERY_PERCENT);
+  networkQuality = prefs.getInt("network", NETWORK_QUALITY);
+
+  Serial.printf("identity from NVS: %s  fleet=%s  battery=%d%%  net=%d\n",
+                deviceId.c_str(), fleetTag.c_str(), batteryPercent,
+                networkQuality);
+  if (deviceId != DEVICE_ID) {
+    Serial.printf("  (this image was built for %s — NVS wins, which is what "
+                  "lets one binary serve the whole fleet)\n", DEVICE_ID);
+  }
+
   currentVersion = prefs.getString("version", INITIAL_VERSION);
   activeSlot = prefs.getString("slot", "A");
 
   confirmBootIfPending();
 
   Serial.printf("\n=== CONVOY %s === v%s slot %s\n",
-                DEVICE_ID, currentVersion.c_str(), activeSlot.c_str());
+                deviceId.c_str(), currentVersion.c_str(), activeSlot.c_str());
   Serial.printf("free heap at boot: %u bytes\n", ESP.getFreeHeap());
   Serial.printf("loop task stack:   %u bytes free\n",
                 uxTaskGetStackHighWaterMark(NULL));
@@ -1312,7 +1366,7 @@ void setup() {
   }
 
   String root = MQTT_TOPIC_ROOT;
-  String id = DEVICE_ID;
+  String id = deviceId;
   T_HELLO  = root + "/d/" + id + "/hello";
   T_HEALTH = root + "/d/" + id + "/health";
   T_STATUS = root + "/d/" + id + "/status";
@@ -1330,7 +1384,7 @@ void setup() {
     setLed(revertedOnBoot ? LED_REVERTED : LED_IDLE);
     delay(4000);   // long enough to read and photograph
   } else {
-    screen("CONVOY", String(DEVICE_ID), "v" + currentVersion, "booting");
+    screen("CONVOY", deviceId, "v" + currentVersion, "booting");
   }
   connectWifi();
   connectMqtt();
@@ -1339,7 +1393,7 @@ void setup() {
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     setLed(LED_FAULT);
-    screen(DEVICE_ID, "wifi lost", "reconnecting");
+    screen(deviceId, "wifi lost", "reconnecting");
     connectWifi();
   }
   if (!mqtt.connected()) {
@@ -1362,8 +1416,8 @@ void loop() {
                   "last update rejected");
     } else {
       screenState("ONLINE", "v" + currentVersion + "  slot " + activeSlot,
-                  "batt " + String(BATTERY_PERCENT) + "%  net " +
-                  String(NETWORK_QUALITY));
+                  "batt " + String(batteryPercent) + "%  net " +
+                  String(networkQuality));
     }
   }
 }

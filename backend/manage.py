@@ -259,6 +259,7 @@ async def cmd_campaign_create(args) -> int:
                 abort_threshold=args.abort_threshold,
                 max_attempts=args.max_attempts,
                 encrypted=args.encrypted,
+                device_min_battery=args.device_min_battery,
             )
         except cs.CampaignError as exc:
             print(f"{R}{exc}{RESET}")
@@ -458,6 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
             # Memory.md D15: the demo needs 0.50, not the 0.40 default.
             c.add_argument("--abort-threshold", type=float,
                            help="failure rate that aborts the campaign (demo: 0.5)")
+            c.add_argument("--device-min-battery", type=int,
+                           help="battery threshold the DEVICE checks against, "
+                                "separate from the server's filter. Set the "
+                                "server's --min-battery low and this high to "
+                                "make the device refuse the offer itself "
+                                "rather than be skipped before it is sent")
             enc = c.add_mutually_exclusive_group()
             enc.add_argument("--encryption", dest="encrypted",
                              action="store_true", default=None,
