@@ -25,6 +25,7 @@
 #include <SHA256.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_mac.h>
 #include <esp_partition.h>
 #include <esp_system.h>
 #include <mbedtls/base64.h>
@@ -1311,32 +1312,65 @@ void setup() {
 
   prefs.begin("convoy", false);
 
-  // First boot on a blank device: adopt the compiled-in defaults and record
-  // them. Every later boot, including after any OTA, reads them back from NVS
-  // and ignores whatever the image happened to be built with.
+  // ---------------------------------------------------------------------
+  // IDENTITY: only a PROVISIONING build may write it.
+  //
+  // The previous version provisioned from config.h whenever NVS was empty.
+  // That is the cloning mechanism, not a guard against it: a fleet image
+  // reaching a board with empty NVS adopts the identity of whichever board it
+  // was compiled for, and three devices become esp32_001.
+  //
+  // So writing identity now requires PROVISION_IDENTITY, which is defined only
+  // in the per-board config used for the single USB flash that commissions a
+  // device. Fleet images are built without it and are physically incapable of
+  // changing who a board is.
+  //
+  // A board that has never been provisioned falls back to an id derived from
+  // its MAC address, which is unique per device. An unprovisioned board is
+  // therefore anonymous but never a DUPLICATE, and duplicates are the failure
+  // that actually hurts: two boards sharing an id evict each other from the
+  // broker in a loop.
+  // ---------------------------------------------------------------------
+#ifdef PROVISION_IDENTITY
+  Serial.println("PROVISIONING BUILD — writing identity from config.h to NVS");
+  prefs.putString("device_id", DEVICE_ID);
+  prefs.putString("wifi_ssid", WIFI_SSID);
+  prefs.putString("wifi_pass", WIFI_PASSWORD);
+  prefs.putString("fleet_tag", FLEET_TAG);
+  prefs.putInt("battery", BATTERY_PERCENT);
+  prefs.putInt("network", NETWORK_QUALITY);
+  Serial.println("  identity written. Rebuild WITHOUT PROVISION_IDENTITY "
+                 "before exporting any image for fleet distribution.");
+#endif
+
   if (!prefs.isKey("device_id")) {
-    Serial.println("no identity in NVS — provisioning from config.h defaults");
-    prefs.putString("device_id", DEVICE_ID);
-    prefs.putString("wifi_ssid", WIFI_SSID);
-    prefs.putString("wifi_pass", WIFI_PASSWORD);
-    prefs.putString("fleet_tag", FLEET_TAG);
-    prefs.putInt("battery", BATTERY_PERCENT);
-    prefs.putInt("network", NETWORK_QUALITY);
+    // Never provisioned, and this is not a provisioning build. Derive a unique
+    // id from the MAC rather than adopting the compiled-in one.
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char derived[24];
+    snprintf(derived, sizeof(derived), "esp32_%02x%02x%02x",
+             mac[3], mac[4], mac[5]);
+    prefs.putString("device_id", derived);
+    Serial.printf("no identity in NVS and this is not a provisioning build — "
+                  "using MAC-derived id %s\n", derived);
+    Serial.println("  Flash this board once with PROVISION_IDENTITY defined "
+                   "to give it its proper identity.");
   }
 
-  deviceId = prefs.getString("device_id", DEVICE_ID);
+  deviceId = prefs.getString("device_id", "esp32_unprovisioned");
   wifiSsid = prefs.getString("wifi_ssid", WIFI_SSID);
   wifiPass = prefs.getString("wifi_pass", WIFI_PASSWORD);
   fleetTag = prefs.getString("fleet_tag", FLEET_TAG);
   batteryPercent = prefs.getInt("battery", BATTERY_PERCENT);
   networkQuality = prefs.getInt("network", NETWORK_QUALITY);
 
-  Serial.printf("identity from NVS: %s  fleet=%s  battery=%d%%  net=%d\n",
+  Serial.printf("identity: %s  fleet=%s  battery=%d%%  net=%d  wifi=%s\n",
                 deviceId.c_str(), fleetTag.c_str(), batteryPercent,
-                networkQuality);
+                networkQuality, wifiSsid.c_str());
   if (deviceId != DEVICE_ID) {
-    Serial.printf("  (this image was built for %s — NVS wins, which is what "
-                  "lets one binary serve the whole fleet)\n", DEVICE_ID);
+    Serial.printf("  (image was built for %s — NVS wins, which is what lets "
+                  "one binary serve the whole fleet)\n", DEVICE_ID);
   }
 
   currentVersion = prefs.getString("version", INITIAL_VERSION);

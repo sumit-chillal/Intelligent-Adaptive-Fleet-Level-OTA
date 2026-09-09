@@ -12,7 +12,27 @@
 // ===========================================================================
 #pragma once
 
+// ======================================================================
+// PROVISIONING
+//
+// Uncomment this ONLY for the single USB flash that commissions a board.
+// While it is defined, every boot writes the identity below into NVS.
+//
+// Then COMMENT IT OUT AGAIN before exporting any image for fleet
+// distribution. A fleet image built with it defined would rewrite the
+// identity of every board it reaches, which is exactly how three devices
+// all came to call themselves esp32_001.
+//
+// With it commented out, the image cannot change who a board is, no matter
+// which board's config it was compiled from.
+//
+// #define PROVISION_IDENTITY
+// ======================================================================
+
 // ---------------------------------------------------------------- identity --
+// These values are written to NVS only by a PROVISION_IDENTITY build. In any
+// other build they are unused: NVS is authoritative, and it survives OTA
+// because an update rewrites an app partition, not the NVS partition.
 // esp32_001 and esp32_002 are healthy. esp32_003 is the low-battery unit that
 // refuses updates on stage — set BATTERY_PERCENT to 8 on that board only.
 #define DEVICE_ID        "esp32_001"
