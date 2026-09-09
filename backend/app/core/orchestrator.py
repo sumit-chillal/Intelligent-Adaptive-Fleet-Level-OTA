@@ -143,11 +143,51 @@ class Orchestrator:
                     select(Campaign).where(Campaign.campaign_id == campaign.campaign_id))
                 if fresh is None or fresh.state != str(CampaignState.RUNNING):
                     continue
+                await self._rescue_stranded(session, fresh)
                 batch = await self._open_batch_row(session, fresh)
                 if batch is None:
                     await self._open_batch(session, fresh)
                 else:
                     await self._maybe_close_batch(session, fresh, batch)
+
+    async def _rescue_stranded(self, session: AsyncSession,
+                               campaign: Campaign) -> None:
+        """Put back any target left waiting by a pause.
+
+        Holding a rollout stops the orchestrator, but a device that has already
+        accepted an offer is left waiting for chunks that will never arrive. On
+        resume the stream is not restarted, so the device waits until the batch
+        timeout marks it FAILED_TIMEOUT -- a device recorded as having failed
+        because the operator pressed Hold.
+
+        Any target in OFFERED or DOWNLOADING with no live stream task is
+        returned to PENDING and offered again. Re-offering rather than resuming
+        mid-stream is deliberate: the pause may have outlasted the device's own
+        patience, and a fresh offer carries a fresh nonce, which keeps the
+        replay protection intact.
+        """
+        stranded = list(await session.scalars(
+            select(CampaignTarget).where(
+                CampaignTarget.campaign_id == campaign.campaign_id,
+                CampaignTarget.state.in_([str(TargetState.OFFERED),
+                                          str(TargetState.DOWNLOADING)]))))
+        requeued = 0
+        for target in stranded:
+            key = f"{campaign.campaign_id}:{target.device_id}"
+            task = self._stream_tasks.get(key)
+            if task is not None and not task.done():
+                continue          # a stream really is running
+            log.warning("target_stranded_requeued", device_id=target.device_id,
+                        was=target.state,
+                        detail="accepted an offer but no stream is running; "
+                               "usually the campaign was paused mid-transfer")
+            target.state = str(TargetState.PENDING)
+            target.batch_id = None
+            target.offer_nonce = None
+            target.last_chunk_index = -1
+            requeued += 1
+        if requeued:
+            await session.flush()
 
     async def _open_batch_row(self, session: AsyncSession, campaign: Campaign) -> Batch | None:
         return await session.scalar(
