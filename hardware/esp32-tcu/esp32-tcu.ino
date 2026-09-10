@@ -1331,27 +1331,70 @@ void setup() {
   // that actually hurts: two boards sharing an id evict each other from the
   // broker in a loop.
   // ---------------------------------------------------------------------
+  // An image that ARRIVED OVER THE AIR may never provision, whatever it was
+  // built with.
+  //
+  // `pending` is written at install time and cleared once the new image
+  // confirms itself, so finding it on this boot means exactly one thing: this
+  // image was just delivered by OTA. A USB flash never sets it.
+  //
+  // That makes the guard a property of HOW THE IMAGE ARRIVED rather than of
+  // what someone remembered to comment out before exporting. The one-shot lock
+  // below protects a board that has already been commissioned; this protects a
+  // board that has not, which is precisely the case that went wrong.
+  const bool arrivedByOta = prefs.isKey("pending");
+
 #ifdef PROVISION_IDENTITY
-  Serial.println("PROVISIONING BUILD — writing identity from config.h to NVS");
-  prefs.putString("device_id", DEVICE_ID);
-  prefs.putString("wifi_ssid", WIFI_SSID);
-  prefs.putString("wifi_pass", WIFI_PASSWORD);
-  prefs.putString("fleet_tag", FLEET_TAG);
-  prefs.putInt("battery", BATTERY_PERCENT);
-  prefs.putInt("network", NETWORK_QUALITY);
-  Serial.println("  identity written. Rebuild WITHOUT PROVISION_IDENTITY "
-                 "before exporting any image for fleet distribution.");
+  // Provisioning is ONE-SHOT, enforced by NVS rather than by discipline.
+  //
+  // Requiring the flag to be commented out before every export is a procedure,
+  // and procedures get forgotten: an image exported with it still defined
+  // rewrote the identity of every board it reached, and board 1 started
+  // calling itself esp32_002. The flag did exactly what it was told; the
+  // problem was that being told once was enough to affect an entire fleet.
+  //
+  // A board now records that it has been provisioned. After that the flag has
+  // no effect, so even a fleet image built with it defined cannot change who
+  // any commissioned board is. Re-provisioning requires erase-flash, which is
+  // a deliberate physical act on one board at a time -- exactly the level of
+  // intent that changing a device's identity should need.
+  if (arrivedByOta) {
+    Serial.println("WARNING: this OTA image was built with PROVISION_IDENTITY "
+                   "defined, which would have rewritten this board's identity. "
+                   "Ignoring it.");
+    Serial.println("  Rebuild fleet images with that line commented out.");
+  } else if (prefs.getBool("provisioned", false)) {
+    Serial.println("PROVISION_IDENTITY is defined but this board is already "
+                   "provisioned — ignoring it.");
+    Serial.println("  (erase-flash first if you really mean to re-commission "
+                   "this board)");
+  } else {
+    Serial.println("PROVISIONING — writing identity from config.h to NVS");
+    prefs.putString("device_id", DEVICE_ID);
+    prefs.putString("wifi_ssid", WIFI_SSID);
+    prefs.putString("wifi_pass", WIFI_PASSWORD);
+    prefs.putString("fleet_tag", FLEET_TAG);
+    prefs.putInt("battery", BATTERY_PERCENT);
+    prefs.putInt("network", NETWORK_QUALITY);
+    prefs.putBool("provisioned", true);
+    Serial.println("  identity written and locked.");
+  }
 #endif
 
   if (!prefs.isKey("device_id")) {
-    // Never provisioned, and this is not a provisioning build. Derive a unique
-    // id from the MAC rather than adopting the compiled-in one.
+    // Never provisioned. Derive a unique id from the MAC rather than adopting
+    // the compiled-in one, so an unprovisioned board is anonymous but never a
+    // DUPLICATE — and duplicates are the failure that actually hurts, since
+    // two boards sharing an id evict each other from the broker.
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char derived[24];
     snprintf(derived, sizeof(derived), "esp32_%02x%02x%02x",
              mac[3], mac[4], mac[5]);
     prefs.putString("device_id", derived);
+    // Deliberately NOT marked provisioned: a MAC-derived id is a safe
+    // placeholder, not a commissioning decision, and the board should still
+    // accept a proper identity from a provisioning flash.
     Serial.printf("no identity in NVS and this is not a provisioning build — "
                   "using MAC-derived id %s\n", derived);
     Serial.println("  Flash this board once with PROVISION_IDENTITY defined "
