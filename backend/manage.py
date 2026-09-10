@@ -280,6 +280,13 @@ async def cmd_campaign_create(args) -> int:
               f"{'  (no retries)' if campaign.max_attempts == 1 else ''}")
         print(f"  encryption       "
               f"{'AES-256-GCM' if campaign.encrypted else 'off (plaintext)'}")
+        if campaign.device_min_battery is not None:
+            # Printed only when it differs from the server's filter, because a
+            # two-stage health check is surprising enough that it should be
+            # visible before the campaign runs rather than inferred afterwards
+            # from a device that refused.
+            print(f"  device gate      battery >= {campaign.device_min_battery}%"
+                  f"  (checked ON the device, against its live reading)")
         print(f"\n  state is DRAFT. The orchestrator will start it.\n")
     return 0
 

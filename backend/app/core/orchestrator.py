@@ -42,10 +42,10 @@ nothing is cached across ticks.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -75,6 +75,14 @@ log = structlog.get_logger(__name__)
 # or a device rebooting, without keeping a rollout open for a machine that is
 # switched off.
 MAX_DEFERRALS = 3
+
+# How long a deferred device is left alone before being reconsidered.
+#
+# It has to exceed the time a device legitimately spends unreachable while
+# doing the right thing: reboot after install, then the probation window before
+# it reports in. Anything shorter burns the deferral budget while the device is
+# mid-recovery.
+DEFERRAL_BACKOFF = timedelta(seconds=45)
 
 
 def _now() -> datetime:
@@ -169,14 +177,39 @@ class Orchestrator:
         stranded = list(await session.scalars(
             select(CampaignTarget).where(
                 CampaignTarget.campaign_id == campaign.campaign_id,
-                CampaignTarget.state.in_([str(TargetState.OFFERED),
-                                          str(TargetState.DOWNLOADING)]))))
+                # OFFERED only. A DOWNLOADING device is demonstrably alive --
+                # it acked, and chunks are landing -- so rescuing it re-offers
+                # a transfer that was already working. That happened: a board
+                # 29 seconds past its final chunk was requeued and had to redo
+                # the whole download on attempt 2.
+                #
+                # A genuine stall mid-download is already covered by the batch
+                # timeout, which is the right mechanism for it because it
+                # measures the thing that matters -- how long since anything
+                # happened -- rather than how long since the offer.
+                CampaignTarget.state == str(TargetState.OFFERED))))
+        # An offer is IN FLIGHT between publication and the device's ack, and
+        # during that window there is legitimately no stream. Rescuing on the
+        # absence of a stream alone therefore cancels healthy offers moments
+        # after sending them, re-sends, and repeats -- four offers in thirteen
+        # seconds, a target finally marked SKIPPED, and a device that quietly
+        # installed one of them anyway. The server's record then disagreed with
+        # the hardware.
+        #
+        # A grace period distinguishes "no stream yet" from "no stream ever".
+        # It has to comfortably exceed a slow device's think time: verifying an
+        # Ed25519 signature and 136 chunk hashes on a 240 MHz core takes real
+        # seconds, and a hotspot adds more.
+        grace = timedelta(seconds=90)
+        now = _now()
         requeued = 0
         for target in stranded:
             key = f"{campaign.campaign_id}:{target.device_id}"
             task = self._stream_tasks.get(key)
             if task is not None and not task.done():
                 continue          # a stream really is running
+            if target.started_at is not None and now - target.started_at < grace:
+                continue          # offered recently; give the device time
             log.warning("target_stranded_requeued", device_id=target.device_id,
                         was=target.state,
                         detail="accepted an offer but no stream is running; "
@@ -249,6 +282,17 @@ class Orchestrator:
                 min_network_quality=original.min_network_quality,
                 abort_threshold=original.abort_threshold,
                 max_attempts=original.max_attempts,
+                # Inherit the ORIGINAL campaign's delivery policy rather than
+                # taking today's defaults.
+                #
+                # A rollback reaches exactly the devices the original reached,
+                # so it must be deliverable on the same terms. Falling back to
+                # the global default meant a rollback of a plaintext campaign
+                # was created encrypted, and every target was skipped for
+                # having no key -- the recovery failed for a reason that had
+                # nothing to do with the incident.
+                encrypted=original.encrypted,
+                device_min_battery=original.device_min_battery,
                 is_rollback=True,
                 created_by="rollback",
             )
@@ -290,7 +334,12 @@ class Orchestrator:
         pending = list(await session.scalars(
             select(CampaignTarget)
             .where(CampaignTarget.campaign_id == campaign.campaign_id,
-                   CampaignTarget.state == str(TargetState.PENDING))
+                   CampaignTarget.state == str(TargetState.PENDING),
+                   # A deferred target waits out a backoff before being
+                   # reconsidered. ended_at is NULL for a target that has never
+                   # been tried, so first attempts are unaffected.
+                   or_(CampaignTarget.ended_at.is_(None),
+                       CampaignTarget.ended_at < _now() - DEFERRAL_BACKOFF))
             .order_by(CampaignTarget.id)))
 
         if not pending:
@@ -857,7 +906,19 @@ class Orchestrator:
                 continue
             target.state = str(TargetState.PENDING)
             target.batch_id = None
-            target.ended_at = None
+            # ended_at is KEPT as the moment of deferral, and the selector
+            # below refuses to reconsider a target until a backoff has passed.
+            #
+            # Without it the three deferrals were spent in nine seconds, which
+            # is no patience at all for the thing being waited on: a device
+            # that has just installed an update reboots, then serves a 90
+            # second probation before it reports in. A rollback issued straight
+            # after a successful rollout would therefore find the device
+            # "offline" three times and give up, while the device was doing
+            # exactly what it was supposed to.
+            #
+            # The count was never the problem. The interval was.
+            target.ended_at = _now()
             log.info("target_deferred", device_id=target.device_id,
                      deferral=target.deferrals, of=MAX_DEFERRALS,
                      reason=target.last_reason_code)

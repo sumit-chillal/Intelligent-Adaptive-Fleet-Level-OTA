@@ -101,7 +101,8 @@ class DryRunEntry:
 async def dry_run(session: AsyncSession, *, firmware_id: str,
                   selector: Selector, min_battery: int,
                   min_network_quality: int,
-                  is_rollback: bool = False) -> list[DryRunEntry]:
+                  is_rollback: bool = False,
+                  device_min_battery: int | None = None) -> list[DryRunEntry]:
     """What WOULD happen, without committing anything.
 
     This exists because an operator should never have to start a rollout to
@@ -121,12 +122,13 @@ async def dry_run(session: AsyncSession, *, firmware_id: str,
         target_version_code=firmware.version_code,
         offline_ttl_seconds=settings.device_offline_ttl_seconds,
         is_rollback=is_rollback,
-        # Falls back to the global default when not stated, so existing
-        # behaviour is unchanged for anyone who does not pass the flag.
-        encrypted=(settings.firmware_encryption_enabled
-                   if encrypted is None else encrypted),
-        device_min_battery=device_min_battery,
     )
+    # device_min_battery is deliberately NOT applied here.
+    #
+    # A dry run answers "which devices will the SERVER offer this to", and that
+    # is the server's filter. The device's own check happens later against a
+    # live reading this preview cannot see, so folding it in would make the
+    # preview claim to predict something it has no way to know.
 
     out: list[DryRunEntry] = []
     for device in devices:
@@ -219,6 +221,9 @@ async def create_campaign(
         min_battery=min_battery if min_battery is not None else settings.default_min_battery,
         min_network_quality=min_network_quality if min_network_quality is not None
         else settings.default_min_network_quality,
+        # The threshold the DEVICE checks against, which may be stricter than
+        # the server's filter above. NULL means "same as min_battery".
+        device_min_battery=device_min_battery,
         # 1 means "no retries": a failed device stays failed.
         #
         # Retries are the right default for a real fleet -- most failures are
