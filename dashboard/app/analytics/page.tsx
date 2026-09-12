@@ -8,7 +8,7 @@
  * I defend it to someone who wasn't watching".
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -19,12 +19,44 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import {
+  DeliveryTimeline,
+  EligibilityFunnel,
+  ImplementationCompare,
+} from "@/components/CampaignCharts";
 import { Nav } from "@/components/Nav";
 import { api, type Campaign } from "@/lib/api";
+
+/**
+ * Which device family a campaign targeted.
+ *
+ * A campaign does not record this directly — it records a firmware id, and
+ * firmware records a model. Deriving it from the targets is more robust than
+ * adding a column, because it stays correct for the campaigns already in the
+ * database and cannot drift from what actually happened.
+ */
+function familyOf(c: Campaign): string {
+  const ids = (c.targets ?? []).map((t) => t.device_id);
+  if (ids.some((i) => i.startsWith("esp32"))) return "esp32-tcu-v1";
+  if (ids.some((i) => i.startsWith("tcu_"))) return "tcu-sim-v1";
+  return "unknown";
+}
+
+const FAMILY_LABEL: Record<string, string> = {
+  all: "All devices",
+  "tcu-sim-v1": "Simulated TCUs",
+  "esp32-tcu-v1": "ESP32 boards",
+  unknown: "Other",
+};
+
+type SortKey = "recent" | "name" | "devices" | "failures";
 
 export default function AnalyticsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selected, setSelected] = useState<Campaign | null>(null);
+  const [family, setFamily] = useState<string>("all");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortKey>("recent");
 
   useEffect(() => {
     void (async () => {
@@ -35,6 +67,67 @@ export default function AnalyticsPage() {
   }, []);
 
   const pick = async (id: string) => setSelected(await api.campaign(id));
+
+  /**
+   * The other family's most recent comparable campaign.
+   *
+   * Chosen automatically rather than with a second picker: asking someone to
+   * select two campaigns to compare means they must already know which two are
+   * worth comparing, which is the thing the chart is supposed to tell them.
+   * "Most recent run of the other implementation" is almost always right.
+   */
+  const [counterpart, setCounterpart] = useState<Campaign | null>(null);
+  useEffect(() => {
+    if (!selected) {
+      setCounterpart(null);
+      return;
+    }
+    const mine = familyOf(selected);
+    const other = campaigns.find(
+      (c) =>
+        familyOf(c) !== mine &&
+        familyOf(c) !== "unknown" &&
+        c.campaign_id !== selected.campaign_id &&
+        (c.counts?.SUCCEEDED ?? 0) > 0,
+    );
+    if (!other) {
+      setCounterpart(null);
+      return;
+    }
+    let live = true;
+    api.campaign(other.campaign_id).then((full) => {
+      if (live) setCounterpart(full);
+    });
+    return () => {
+      live = false;
+    };
+  }, [selected, campaigns]);
+
+  // Filtering and sorting happen on the list already fetched. The list is
+  // small and entirely in memory, so a round trip per keystroke would add
+  // latency to solve a problem that does not exist.
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let list = campaigns.filter((c) => {
+      if (family !== "all" && familyOf(c) !== family) return false;
+      if (!q) return true;
+      return (
+        c.name.toLowerCase().includes(q) ||
+        c.campaign_id.toLowerCase().includes(q) ||
+        c.state.toLowerCase().includes(q)
+      );
+    });
+    const failures = (c: Campaign) => c.counts?.FAILED ?? 0;
+    const devices = (c: Campaign) =>
+      Object.values(c.counts ?? {}).reduce((a, b) => a + b, 0);
+    list = [...list].sort((a, b) => {
+      if (sort === "name") return a.name.localeCompare(b.name);
+      if (sort === "devices") return devices(b) - devices(a);
+      if (sort === "failures") return failures(b) - failures(a);
+      return b.created_at.localeCompare(a.created_at);
+    });
+    return list;
+  }, [campaigns, family, query, sort]);
 
   const decisions = selected?.decisions ?? [];
   const targets = selected?.targets ?? [];
@@ -66,29 +159,134 @@ export default function AnalyticsPage() {
       <Nav />
 
       <section className="panel mb-3 p-4">
-        <div className="legend mb-3">Campaign</div>
-        <div className="flex flex-wrap gap-2">
-          {campaigns.map((c) => (
-            <button
-              key={c.campaign_id}
-              onClick={() => pick(c.campaign_id)}
-              className="border px-3 py-1 text-left font-mono text-data hover:border-ink-mute"
-              style={{
-                borderColor:
-                  selected?.campaign_id === c.campaign_id
-                    ? "var(--ink)"
-                    : "var(--rule)",
-                background:
-                  selected?.campaign_id === c.campaign_id
-                    ? "var(--concrete)"
-                    : "var(--panel)",
-              }}
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <span className="legend">Campaign</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={family}
+              onChange={(e) => setFamily(e.target.value)}
+              className="border border-rule bg-panel px-2 py-1 font-mono text-data"
+              aria-label="Device family"
             >
-              {c.name}
-              <span className="ml-2 text-[11px] text-ink-mute">{c.state}</span>
-            </button>
-          ))}
+              {["all", "tcu-sim-v1", "esp32-tcu-v1"].map((f) => (
+                <option key={f} value={f}>
+                  {FAMILY_LABEL[f]}
+                </option>
+              ))}
+            </select>
+
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="search name, id or state"
+              className="w-[15rem] border border-rule bg-panel px-2 py-1 font-mono text-data"
+              aria-label="Search campaigns"
+            />
+
+            <select
+              value={sort}
+              onChange={(e) => setSort(e.target.value as SortKey)}
+              className="border border-rule bg-panel px-2 py-1 font-mono text-data"
+              aria-label="Sort campaigns"
+            >
+              <option value="recent">newest first</option>
+              <option value="name">by name</option>
+              <option value="devices">most devices</option>
+              <option value="failures">most failures</option>
+            </select>
+
+            <span className="font-mono text-[11px] text-ink-mute">
+              {shown.length}/{campaigns.length}
+            </span>
+          </div>
         </div>
+
+        {shown.length === 0 && (
+          <p className="text-body text-ink-mute">
+            No campaigns match. Clear the search or choose a different family.
+          </p>
+        )}
+
+        {/* A scrolling LIST, not a wrapped pile of chips.
+            
+            Twenty campaigns as inline buttons wrap into a ragged block where
+            no column lines up and the eye has nowhere to travel. One row each,
+            with the name, family, state and outcome in fixed columns, can be
+            scanned down a single edge — and it has room for the outcome, which
+            is what someone is usually looking for. */}
+        {shown.length > 0 && (
+          <div className="max-h-[19rem] overflow-y-auto rounded-xl border border-rule">
+            <table className="w-full font-mono text-data">
+              <thead className="sticky top-0 bg-panel">
+                <tr className="border-b border-rule text-left">
+                  <th className="legend px-3 py-2 font-normal">Campaign</th>
+                  <th className="legend px-3 py-2 font-normal">Family</th>
+                  <th className="legend px-3 py-2 font-normal">State</th>
+                  <th className="legend px-3 py-2 font-normal">Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((c) => {
+                  const on = selected?.campaign_id === c.campaign_id;
+                  const ok =
+                    (c.counts?.SUCCEEDED ?? 0) + (c.counts?.ROLLED_BACK ?? 0);
+                  const failed = c.counts?.FAILED ?? 0;
+                  const fam = familyOf(c);
+                  return (
+                    <tr
+                      key={c.campaign_id}
+                      onClick={() => pick(c.campaign_id)}
+                      className="cursor-pointer border-b border-rule/50 transition-colors hover:bg-concrete/60"
+                      style={{ background: on ? "var(--concrete)" : undefined }}
+                    >
+                      <td className="px-3 py-[7px]">
+                        <span
+                          className="mr-2 inline-block h-[6px] w-[6px] rounded-full align-middle"
+                          style={{
+                            background: on ? "var(--transit)" : "transparent",
+                          }}
+                        />
+                        {c.name}
+                        {c.is_rollback && (
+                          <span style={{ color: "var(--govern)" }}> ↓</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-[7px] text-[11px] text-ink-mute">
+                        {fam === "esp32-tcu-v1"
+                          ? "board"
+                          : fam === "tcu-sim-v1"
+                            ? "sim"
+                            : "—"}
+                      </td>
+                      <td
+                        className="px-3 py-[7px] text-[11px]"
+                        style={{
+                          color:
+                            c.state === "ABORTED"
+                              ? "var(--fault)"
+                              : c.state === "RUNNING"
+                                ? "var(--transit)"
+                                : "var(--ink-mute)",
+                        }}
+                      >
+                        {c.state}
+                      </td>
+                      <td className="px-3 py-[7px] text-[11px] text-ink-mute">
+                        {ok} ok
+                        {failed > 0 && (
+                          <span style={{ color: "var(--fault)" }}>
+                            {" "}
+                            · {failed} failed
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       {!selected ? (
@@ -323,6 +521,34 @@ export default function AnalyticsPage() {
           </section>
         </>
       )}
+
+      {selected && (
+        <div className="mt-3 space-y-3">
+          <DeliveryTimeline campaign={selected} />
+          <EligibilityFunnel campaign={selected} />
+          <ImplementationCompare
+            left={{
+              title: `${selected.name} · ${
+                familyOf(selected) === "esp32-tcu-v1" ? "ESP32 boards" : "simulated TCUs"
+              }`,
+              campaign: selected,
+            }}
+            right={
+              counterpart
+                ? {
+                    title: `${counterpart.name} · ${
+                      familyOf(counterpart) === "esp32-tcu-v1"
+                        ? "ESP32 boards"
+                        : "simulated TCUs"
+                    }`,
+                    campaign: counterpart,
+                  }
+                : null
+            }
+          />
+        </div>
+      )}
+
     </main>
   );
 }

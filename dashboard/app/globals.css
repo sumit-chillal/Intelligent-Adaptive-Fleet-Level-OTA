@@ -50,29 +50,27 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Archivo is loaded as a variable font, so the expanded width that gives the
-   display face its instrument-panel character is set here rather than by
-   picking a static cut. */
+/* Display.
+   
+   There is no width axis any more: the page is set in one family, IBM Plex,
+   and headings separate themselves by WEIGHT and TRACKING rather than by a
+   different typeface. That is a stronger signal anyway — a reader cannot
+   mistake it for a different kind of content the way a second family invites
+   them to. */
 .font-display {
-  font-variation-settings: "wdth" 112;
-}
-
-/* The display face is Archivo's variable font. Expanding the width axis is
-   what gives it the silkscreened instrument-panel character described in
-   Design.md -- narrow grotesques read as web-app chrome, wide ones read as
-   equipment labelling. */
-.font-display {
-  font-variation-settings: "wdth" 118;
-  font-weight: 700;
-}
-
-/* Silkscreen legend. Structural, used for section labels only. */
-.legend {
   font-family: var(--font-display), sans-serif;
-  font-variation-settings: "wdth" 108;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+/* Silkscreen legend. Structural, used for section labels only.
+   Tight size, wide tracking and uppercase do the work the expanded face used
+   to do, and they survive at 11px in a way a width axis does not. */
+.legend {
+  font-family: var(--font-body), sans-serif;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
   color: var(--ink-mute);
 }
@@ -131,4 +129,79 @@ body {
 :focus-visible {
   outline: 2px solid var(--transit);
   outline-offset: 2px;
+}
+
+/* ==========================================================================
+   GLOBAL ENFORCEMENT
+   Rules that hold across the whole application, so a component cannot drift.
+   ========================================================================== */
+
+/**
+ * One family, everywhere.
+ *
+ * Components were setting fonts locally, which is how an application ends up
+ * with four typefaces nobody chose. Form controls are the usual offenders:
+ * button, input and select do NOT inherit font from their parent by default —
+ * browsers give them a system UI face — so they have to be told explicitly.
+ */
+button,
+input,
+select,
+textarea,
+optgroup {
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+/**
+ * Every button is rounded.
+ *
+ * Applied as a floor rather than per component, because "no rogue sharp-edged
+ * buttons" is a property of the application, not something each new component
+ * can be trusted to remember. Anything wanting a different radius — the pill
+ * status lamps, the circular showroom arrows — sets its own and wins on
+ * specificity.
+ */
+button,
+.btn,
+input[type="button"],
+input[type="submit"] {
+  border-radius: 10px;
+}
+
+/* Selects and text inputs match, so a filter row reads as one control set. */
+input[type="text"],
+input[type="search"],
+select {
+  border-radius: 10px;
+}
+
+/**
+ * Visible focus for keyboard users.
+ *
+ * Rounded corners are only an improvement if the focus ring follows them;
+ * a square ring on a round button looks like a rendering fault.
+ */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--transit);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/* Respect a reduced-motion preference: the wave, the turntable and the card
+   springs are all decorative, and none of them carry information that is not
+   also written down. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

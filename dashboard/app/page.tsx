@@ -1,231 +1,213 @@
 "use client";
 
 /**
- * Home — the fleet at rest.
+ * Landing.
  *
- * The live page answers "is this rollout safe". This one answers the question
- * asked far more often, when nothing is rolling out at all: what state is my
- * fleet actually in? How many devices, how many reachable, which versions are
- * out there, and what has been happening.
+ * The car is the page. It sits centred with the wordmark above it and the
+ * routes below, because the object is the subject — a headline beside it would
+ * compete with the only thing on the page worth looking at, and a visitor who
+ * has just seen a car on a lit turntable does not need to be told in forty-
+ * point type what the project is about.
  *
- * Deliberately not the live page with fewer widgets. Version fragmentation is
- * the headline here because it is the number that decides whether a rollout is
- * needed in the first place.
+ * Everything that explains sits below the fold, where someone who wants it
+ * will scroll for it.
  */
 
-import { useMemo, useState } from "react";
-import { DeviceDrawer } from "@/components/DeviceDrawer";
-import { FleetGrid } from "@/components/FleetGrid";
-import { Nav } from "@/components/Nav";
-import { VersionDonut } from "@/components/VersionDonut";
-import { useConvoy } from "@/lib/useConvoy";
+import { motion } from "motion/react";
+import dynamic from "next/dynamic";
 
-const clock = (ts: string) =>
-  new Date(ts).toLocaleTimeString("en-GB", { hour12: false });
+import { ConvoyLogo } from "@/components/ConvoyLogo";
 
-/** Numeric version compare. A string sort puts 1.9.0 above 1.10.0. */
-const versionCode = (v: string | null) =>
-  (v ?? "0.0.0").split(".").reduce((n, p) => n * 1000 + (parseInt(p) || 0), 0);
+const CarShowcase = dynamic(
+  () => import("@/components/CarShowcase").then((m) => m.CarShowcase),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-[clamp(380px,58vh,660px)] w-full items-center justify-center rounded-xl border border-rule bg-concrete">
+        <span className="legend">preparing the showroom…</span>
+      </div>
+    ),
+  },
+);
 
-export default function HomePage() {
-  const { devices, campaigns, events, progress, connection } = useConvoy();
-  const [selected, setSelected] = useState<string | null>(null);
+const POINTS = [
+  {
+    title: "Adaptive, not scheduled",
+    body: "Batch size responds to what actually happens. A failure contracts the rollout within seconds; clean batches earn it back.",
+  },
+  {
+    title: "Signed at the source",
+    body: "Every device verifies an Ed25519 manifest before a byte reaches flash. An attacker holding the network still cannot install firmware.",
+  },
+  {
+    title: "Reversible by design",
+    body: "Updates land in an inactive partition and must prove themselves. One that cannot is reverted without anyone touching the vehicle.",
+  },
+];
 
-  const stats = useMemo(() => {
-    const online = devices.filter((d) => d.online).length;
-    const lowBattery = devices.filter(
-      (d) => d.battery !== null && d.battery < 30,
-    ).length;
-    const weakSignal = devices.filter(
-      (d) => d.network_quality !== null && d.network_quality < 2,
-    ).length;
-    const newest = devices.reduce(
-      (best, d) =>
-        versionCode(d.current_version) > versionCode(best)
-          ? d.current_version ?? best
-          : best,
-      "0.0.0",
-    );
-    const onCurrent = devices.filter((d) => d.current_version === newest).length;
-    return { online, lowBattery, weakSignal, newest, onCurrent };
-  }, [devices]);
+const FIGURES: [string, string][] = [
+  ["18", "devices"],
+  ["4", "networks"],
+  ["2", "implementations"],
+  ["97s", "full fleet rollout"],
+];
 
-  const active = campaigns.find((c) => c.state === "RUNNING");
-  const recent = campaigns.slice(0, 5);
-
+export default function LandingPage() {
   return (
-    <main className="mx-auto max-w-[1600px] px-6 py-5">
-      <Nav
-        right={
-          <span className="flex items-center gap-2 font-mono text-legend text-ink-mute">
-            <span
-              className="h-[7px] w-[7px] rounded-full"
+    <main className="min-h-screen">
+      <section className="mx-auto max-w-[1600px] px-6 pt-9">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, ease: [0.2, 0.8, 0.2, 1] }}
+          className="mb-7 flex flex-col items-center"
+        >
+          <ConvoyLogo size={76} tagline />
+          <p className="mt-4 max-w-[42rem] text-center text-lead text-ink-mute">
+            Adaptive fleet-level firmware delivery over an untrusted network.
+            Eighteen devices, two implementations, four networks, one protocol.
+          </p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, scale: 0.985 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.6, ease: [0.2, 0.8, 0.2, 1] }}
+        >
+          <CarShowcase />
+        </motion.div>
+
+        {/* One primary action, two secondary.
+            
+            Three buttons of equal weight is not a choice, it is a menu — the
+            reader has to evaluate all three before doing anything. Making
+            "Open dashboard" solid and the others quiet means the page has an
+            obvious default and two ways out of it. */}
+        <div className="mt-9 flex flex-wrap items-stretch justify-center gap-2">
+          <Action href="/dashboard" primary>
+            Open dashboard
+          </Action>
+          <Action href="/live">Watch a rollout</Action>
+          <Action href="/analytics">Analytics</Action>
+        </div>
+
+        {/* Hairlines between the figures rather than wide gaps: four numbers
+            spaced apart read as four unrelated facts, four numbers in a ruled
+            row read as one measurement of one system. */}
+        <div className="mx-auto mt-12 flex max-w-[56rem] flex-wrap justify-center">
+          {FIGURES.map(([n, l], i) => (
+            <motion.div
+              key={l}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 + i * 0.06, duration: 0.35 }}
+              className="flex-1 px-7 text-center"
               style={{
-                background:
-                  connection === "live" ? "var(--verified)" : "var(--govern)",
+                minWidth: "9rem",
+                borderLeft: i === 0 ? "none" : "1px solid var(--rule)",
               }}
-            />
-            {connection === "live" ? "live" : "reconnecting…"}
-          </span>
-        }
-      />
-
-      <section className="panel mb-3 flex flex-wrap items-end justify-between gap-8 px-6 py-5">
-        <div>
-          <div className="legend mb-1">Fleet</div>
-          <div className="font-display text-state font-bold">{devices.length}</div>
-        </div>
-        <Figure
-          label="Reachable"
-          value={`${stats.online}/${devices.length}`}
-          color={
-            devices.length && stats.online === devices.length
-              ? "var(--verified)"
-              : "var(--govern)"
-          }
-        />
-        <Figure
-          label={`On ${stats.newest}`}
-          value={`${stats.onCurrent}/${devices.length}`}
-        />
-        <Figure
-          label="Low battery"
-          value={String(stats.lowBattery)}
-          color={stats.lowBattery ? "var(--fault)" : undefined}
-        />
-        <Figure
-          label="Weak signal"
-          value={String(stats.weakSignal)}
-          color={stats.weakSignal ? "var(--fault)" : undefined}
-        />
-        <div>
-          <div className="legend mb-1">Rollout</div>
-          <div
-            className="font-mono text-figure font-medium"
-            style={{ color: active ? "var(--transit)" : "var(--ink-mute)" }}
-          >
-            {active ? "in progress" : "idle"}
-          </div>
-          {active && (
-            <a href="/live" className="font-mono text-[11px] text-ink-mute underline">
-              {active.name} →
-            </a>
-          )}
-        </div>
-      </section>
-
-      <div className="mb-3 grid gap-3 lg:grid-cols-2">
-        <VersionDonut devices={devices} />
-
-        <section className="panel p-4">
-          <div className="legend mb-3">Recent campaigns</div>
-          {recent.length === 0 ? (
-            <p className="text-body text-ink-mute">
-              No campaigns yet. Publish a firmware version to get started.
-            </p>
-          ) : (
-            <table className="w-full font-mono text-data">
-              <thead>
-                <tr className="border-b border-rule text-left">
-                  <th className="legend py-1 pr-3 font-normal">Name</th>
-                  <th className="legend py-1 pr-3 font-normal">State</th>
-                  <th className="legend py-1 pr-3 font-normal">Outcome</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recent.map((c) => {
-                  const ok =
-                    (c.counts?.SUCCEEDED ?? 0) + (c.counts?.ROLLED_BACK ?? 0);
-                  const failed = c.counts?.FAILED ?? 0;
-                  return (
-                    <tr key={c.campaign_id} className="border-b border-rule/50">
-                      <td className="py-[6px] pr-3">
-                        {c.name}
-                        {(c as { is_rollback?: boolean }).is_rollback && (
-                          <span style={{ color: "var(--govern)" }}> ↓</span>
-                        )}
-                      </td>
-                      <td
-                        className="py-[6px] pr-3"
-                        style={{
-                          color:
-                            c.state === "ABORTED"
-                              ? "var(--fault)"
-                              : c.state === "RUNNING"
-                                ? "var(--transit)"
-                                : "var(--ink-mute)",
-                        }}
-                      >
-                        {c.state}
-                      </td>
-                      <td className="py-[6px] pr-3 text-ink-mute">
-                        {ok} ok
-                        {failed > 0 && (
-                          <span style={{ color: "var(--fault)" }}> · {failed} failed</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </section>
-      </div>
-
-      <div className="mb-3">
-        <FleetGrid devices={devices} progress={progress} onSelect={setSelected} />
-      </div>
-
-      <section className="panel p-4">
-        <div className="legend mb-3">Recent activity</div>
-        <div className="space-y-[4px]">
-          {events.length === 0 && (
-            <p className="text-body text-ink-mute">Nothing recorded yet.</p>
-          )}
-          {events.slice(0, 15).map((e) => (
-            <div key={e.id} className="flex gap-3 font-mono text-[11px]">
-              <span className="text-ink-mute">{clock(e.ts)}</span>
-              <button
-                onClick={() => setSelected(e.device_id)}
-                className="underline decoration-dotted"
-              >
-                {e.device_id}
-              </button>
-              <span
-                style={{
-                  color: e.reason_code?.startsWith("FAILED")
-                    ? "var(--fault)"
-                    : "var(--ink-mute)",
-                }}
-              >
-                {e.reason_code ?? e.event_type}
-              </span>
-            </div>
+            >
+              <div className="font-mono text-figure font-medium">{n}</div>
+              <div className="legend mt-1">{l}</div>
+            </motion.div>
           ))}
         </div>
       </section>
 
-      <DeviceDrawer deviceId={selected} onClose={() => setSelected(null)} />
+      <section className="mx-auto max-w-[1600px] px-6 py-16">
+        <div className="grid gap-3 md:grid-cols-3">
+          {POINTS.map((p, i) => (
+            <motion.article
+              key={p.title}
+              initial={{ opacity: 0, y: 16 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ delay: i * 0.08, duration: 0.4 }}
+              whileHover={{ y: -4 }}
+              className="panel rounded-xl p-5"
+            >
+              <div className="legend mb-2">{String(i + 1).padStart(2, "0")}</div>
+              <h2 className="mb-2 font-display text-lead font-bold">{p.title}</h2>
+              <p className="text-body text-ink-mute">{p.body}</p>
+            </motion.article>
+          ))}
+        </div>
+      </section>
+
+      <footer className="mx-auto max-w-[1600px] border-t border-rule px-6 py-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span className="legend">Convoy · adaptive fleet OTA</span>
+          <span className="font-mono text-[11px] text-ink-mute">
+            smarter data, better world
+          </span>
+        </div>
+      </footer>
     </main>
   );
 }
 
-function Figure({
-  label,
-  value,
-  color,
+/**
+ * The wordmark from the reference: CONVOY in a wide display face with a tyre
+ * tucked beneath the centre, its tread visible, and the road running out to
+ * either side.
+ *
+ * Drawn rather than imported. Six shapes do not justify an asset pipeline, and
+ * an inline SVG inherits currentColor, so the mark follows the theme instead of
+ * needing its own colour rules.
+ */
+
+/**
+ * A call to action.
+ *
+ * `primary` is filled, everything else is outlined. The distinction is carried
+ * by fill rather than by colour so it survives a projector with poor contrast,
+ * which is where this page will actually be seen.
+ */
+function Action({
+  href,
+  children,
+  primary = false,
 }: {
-  label: string;
-  value: string;
-  color?: string;
+  href: string;
+  children: React.ReactNode;
+  primary?: boolean;
 }) {
   return (
-    <div>
-      <div className="legend mb-1">{label}</div>
-      <div className="font-mono text-big font-medium" style={{ color }}>
-        {value}
-      </div>
-    </div>
+    <motion.a
+      href={href}
+      whileHover={{ y: -2 }}
+      whileTap={{ y: 0, scale: 0.985 }}
+      transition={{ type: "spring", stiffness: 420, damping: 30 }}
+      className="group inline-flex items-center gap-3 rounded-xl border px-7 py-[13px] font-mono text-data transition-colors"
+      style={
+        primary
+          ? {
+              background: "var(--ink)",
+              color: "var(--panel)",
+              borderColor: "var(--ink)",
+            }
+          : { borderColor: "var(--rule)" }
+      }
+    >
+      {children}
+      {primary && (
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden
+          className="transition-transform group-hover:translate-x-[3px]"
+        >
+          <path
+            d="M2.5 8 H13 M9 4 L13 8 L9 12"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </motion.a>
   );
 }

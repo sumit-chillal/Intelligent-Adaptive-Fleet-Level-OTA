@@ -1,16 +1,23 @@
 "use client";
 
 /**
- * Fleet grid. One tile per device.
+ * The fleet, grouped by what kind of device it is.
  *
- * Every state carries a SHAPE or a label as well as a colour — failed tiles
- * show a cross, verified a filled square. A projector with poor colour
- * calibration, or a colour-blind examiner, must still be able to read the
- * screen (Design.md §7).
+ * A simulated container and a physical board are interchangeable to the
+ * SERVER — same protocol, same manifests, same reason codes — and that
+ * indifference is the point of the project. But it is a claim about the server,
+ * not a claim about the operator: mixed into one grid, eighteen tiles read as
+ * an undifferentiated wall, and "13 of 18 updated" hides whether the boards or
+ * the containers were the ones that lagged.
+ *
+ * Grouping states the equivalence more clearly than mixing does, because it
+ * puts the two families side by side under the same headings, each with its
+ * own count, and lets the reader see they behave identically.
  */
 
 import type { Device } from "@/lib/api";
 import type { Progress } from "@/lib/useConvoy";
+import { DeviceCard } from "./DeviceCard";
 
 interface Props {
   devices: Device[];
@@ -18,121 +25,103 @@ interface Props {
   targetVersion?: string | null;
   targetStates?: Record<string, string>;
   onSelect?: (deviceId: string) => void;
+  /** Restrict to one family. Omit to show every group. */
+  onlyModel?: string;
 }
 
-function batteryBars(level: number | null) {
-  const filled = level === null ? 0 : Math.ceil((level / 100) * 4);
-  return (
-    <span className="inline-flex items-end gap-[2px]" aria-label={`battery ${level ?? "unknown"}%`}>
-      {[1, 2, 3, 4].map((b) => (
-        <span
-          key={b}
-          className="w-[3px]"
-          style={{
-            height: 3 + b * 2,
-            background: b <= filled
-              ? level !== null && level < 30 ? "var(--fault)" : "var(--ink-mute)"
-              : "var(--rule)",
-          }}
-        />
-      ))}
-    </span>
-  );
+/** Display names, so the interface never shows a raw model string. */
+export const FAMILY: Record<string, { label: string; note: string }> = {
+  "tcu-sim-v1": {
+    label: "Simulated TCUs",
+    note: "Docker containers across three laptops",
+  },
+  "esp32-tcu-v1": {
+    label: "ESP32 boards",
+    note: "physical hardware on separate networks",
+  },
+};
+
+/** Simulators first, then hardware, then anything unrecognised. */
+export const FAMILY_ORDER = ["tcu-sim-v1", "esp32-tcu-v1"];
+
+export function groupByFamily(devices: Device[]): [string, Device[]][] {
+  const groups = new Map<string, Device[]>();
+  for (const d of devices) {
+    const key = d.model ?? "unknown";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(d);
+  }
+  const keys = [
+    ...FAMILY_ORDER.filter((k) => groups.has(k)),
+    // Unrecognised models are listed rather than dropped: a device the UI does
+    // not know about is exactly the one worth noticing.
+    ...[...groups.keys()].filter((k) => !FAMILY_ORDER.includes(k)),
+  ];
+  return keys.map((k) => [
+    k,
+    groups.get(k)!.sort((a, b) => a.device_id.localeCompare(b.device_id)),
+  ]);
 }
 
-export function FleetGrid({ devices, progress, targetVersion, targetStates = {}, onSelect }: Props) {
-  if (!devices.length) {
+export function FleetGrid({
+  devices,
+  progress,
+  targetVersion,
+  targetStates = {},
+  onSelect,
+  onlyModel,
+}: Props) {
+  const pool = onlyModel ? devices.filter((d) => d.model === onlyModel) : devices;
+
+  if (!pool.length) {
     return (
-      <div className="panel px-5 py-8">
+      <section className="panel px-5 py-8">
         <div className="legend mb-2">Fleet</div>
         <p className="text-body text-ink-mute">
-          No devices connected. Start a TCU container or power on a board — they
+          No devices connected. Start a container or power on a board — they
           appear here within a second of connecting.
         </p>
-      </div>
+      </section>
     );
   }
 
   return (
-    <section className="panel p-4" aria-label="Fleet">
-      <div className="mb-3 flex items-baseline justify-between">
-        <span className="legend">Fleet</span>
-        <span className="font-mono text-legend text-ink-mute">
-          {devices.filter((d) => d.online).length}/{devices.length} online
-        </span>
-      </div>
+    <div className="space-y-3">
+      {groupByFamily(pool).map(([model, list]) => {
+        const online = list.filter((d) => d.online).length;
+        const family = FAMILY[model] ?? { label: model, note: "" };
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
-        {devices.map((device) => {
-          const state = targetStates[device.device_id];
-          const live = progress[device.device_id];
-          const updated = targetVersion && device.current_version === targetVersion;
-
-          const accent =
-            state === "FAILED" ? "var(--fault)"
-            : state === "SKIPPED" ? "var(--dormant)"
-            : state === "ROLLED_BACK" ? "var(--govern)"
-            : updated ? "var(--verified)"
-            : live ? "var(--transit)"
-            : device.online ? "var(--rule)"
-            : "var(--dormant)";
-
-          const mark =
-            state === "FAILED" ? "✕"
-            // Amber and a down-arrow: a reverted device is neither a success
-            // nor a failure, and the strip should not imply either.
-            : state === "ROLLED_BACK" ? "↓"
-            : state === "SKIPPED" ? "–"
-            : updated ? "▪"
-            : live ? "▸"
-            : "";
-
-          return (
-            <button
-              key={device.device_id}
-              onClick={() => onSelect?.(device.device_id)}
-              className="relative overflow-hidden border border-rule bg-panel p-2 text-left transition-colors hover:border-ink-mute"
-              style={{ borderLeftWidth: 3, borderLeftColor: accent }}
-            >
-              {live && !updated && (
-                <span
-                  className="absolute inset-x-0 bottom-0 transition-[height] duration-150"
-                  style={{
-                    height: `${live.percent}%`,
-                    background: "var(--transit)",
-                    opacity: 0.12,
-                  }}
-                />
-              )}
-
-              <div className="relative flex items-center justify-between">
-                <span className="font-mono text-data font-medium">{device.device_id}</span>
-                <span style={{ color: accent }} className="font-mono text-data">{mark}</span>
-              </div>
-
-              <div className="relative mt-1 flex items-center justify-between">
-                <span className="font-mono text-[11px] text-ink-mute">
-                  {device.current_version ?? "—"}
-                </span>
-                <span className="flex items-center gap-2">
-                  {batteryBars(device.battery)}
-                  <span className="font-mono text-[11px] text-ink-mute">
-                    n{device.network_quality ?? "–"}
+        return (
+          <section key={model} className="panel p-4" aria-label={family.label}>
+            <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+              <div>
+                <span className="legend">{family.label}</span>
+                {family.note && (
+                  <span className="ml-3 font-mono text-[11px] text-ink-mute">
+                    {family.note}
                   </span>
-                </span>
+                )}
               </div>
+              <span className="font-mono text-legend text-ink-mute">
+                {online}/{list.length} online
+              </span>
+            </div>
 
-              <div className="relative mt-1 font-mono text-[10px] text-ink-mute">
-                {live && !updated
-                  ? `${live.chunkIndex + 1}/${live.chunkCount} chunks`
-                  : device.online
-                    ? device.fleet_tag ?? "—"
-                    : "offline"}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </section>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {list.map((device) => (
+                <DeviceCard
+                  key={device.device_id}
+                  device={device}
+                  progress={progress[device.device_id]}
+                  targetVersion={targetVersion}
+                  targetState={targetStates[device.device_id]}
+                  onSelect={onSelect}
+                />
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
   );
 }
