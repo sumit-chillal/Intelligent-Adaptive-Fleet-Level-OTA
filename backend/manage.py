@@ -260,6 +260,8 @@ async def cmd_campaign_create(args) -> int:
                 max_attempts=args.max_attempts,
                 encrypted=args.encrypted,
                 device_min_battery=args.device_min_battery,
+                batch_size_min=args.batch_size_min,
+                batch_size_max=args.batch_size_max,
             )
         except cs.CampaignError as exc:
             print(f"{R}{exc}{RESET}")
@@ -271,6 +273,9 @@ async def cmd_campaign_create(args) -> int:
         print(f"  targets          {count} devices (PENDING)")
         print(f"  batch size       {campaign.batch_size_initial} "
               f"(min {campaign.batch_size_min}, max {campaign.batch_size_max})")
+        if campaign.batch_size_min == campaign.batch_size_max:
+            print(f"  {Y}adaptation      PINNED — batch size cannot change. "
+                  f"This is a control condition, not a normal rollout.{RESET}")
         print(f"  canary           {campaign.canary_size}")
         print(f"  eligibility      battery >= {campaign.min_battery}%, "
               f"network >= {campaign.min_network_quality}")
@@ -466,6 +471,13 @@ def build_parser() -> argparse.ArgumentParser:
             # Memory.md D15: the demo needs 0.50, not the 0.40 default.
             c.add_argument("--abort-threshold", type=float,
                            help="failure rate that aborts the campaign (demo: 0.5)")
+            c.add_argument("--batch-size-min", type=int,
+                           help="floor on batch size. Set equal to --batch-size "
+                                "and --batch-size-max to PIN the batch size and "
+                                "disable adaptation, which is how the "
+                                "non-adaptive control condition is run")
+            c.add_argument("--batch-size-max", type=int,
+                           help="ceiling on batch size (see --batch-size-min)")
             c.add_argument("--device-min-battery", type=int,
                            help="battery threshold the DEVICE checks against, "
                                 "separate from the server's filter. Set the "
